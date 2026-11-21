@@ -20,7 +20,9 @@ MAPS_DIR = os.environ.get("BR_MAPS", "/app/maps")
 class Maps:
     def __init__(self, maps_dir: str = MAPS_DIR):
         self.dir = maps_dir
-        self.line_index: dict = {}          # path -> {int(line): [nodeids]}
+        self.line_index: dict = {}          # reserved; line data lives in _line_raw
+        self._line_raw: dict = {}           # path -> {int(line): int_bitset}
+        self._mod_cache: dict = {}
         self.module_importers: dict = {}
         self.class_uses: dict = {}
         self.fixture_map: dict = {}
@@ -44,18 +46,19 @@ class Maps:
 
         self.id_order = rd("id_order.json", [])
         lc = rd("line_coverage.json", {})
+        # Keep line data as raw bitsets: expanding every line to a node-id
+        # list at load time is O(total attributed line-test pairs) (~70M)
+        # and blows the 0.3 s load gate. Bitsets decode lazily per lookup.
         for path, lines in lc.items():
-            decoded = {}
+            raw = {}
             for ln_s, hexstr in lines.items():
                 if not hexstr:
                     continue
                 bits = int(hexstr, 16)
-                ids = [self.id_order[i] for i in range(len(self.id_order))
-                       if (bits >> i) & 1]
-                if ids:
-                    decoded[int(ln_s)] = ids
-            if decoded:
-                self.line_index[path] = decoded
+                if bits:
+                    raw[int(ln_s)] = bits
+            if raw:
+                self._line_raw[path] = raw
         self.module_importers = rd("module_importers.json", {})
         self.class_uses = rd("class_uses.json", {})
         self.fixture_map = rd("fixture_map.json", {})
@@ -65,22 +68,43 @@ class Maps:
         # [nodeid,...] of tests that load files/modules not covered by the
         # other maps. Absent or empty file is a no-op.
         self.unknown_loaders = rd("unknown_loaders.json", {})
-        self.has_line_coverage = bool(self.line_index)
+        self.has_line_coverage = bool(self._line_raw)
         self._loaded = True
 
     # -- selectors use these; all return sets of node ids --
+    def _decode(self, bits: int) -> list:
+        """Node ids covered by a line bitset, in id_order order."""
+        order = self.id_order
+        out = []
+        while bits:
+            low = bits & -bits
+            out.append(order[low.bit_length() - 1])
+            bits ^= low
+        return out
+
     def line_ids(self, path: str, line: int) -> list:
-        idx = self.line_index.get(path, {})
+        raw = self._line_raw.get(path, {})
         for ln in (line, line - 1, line + 1):
-            if ln in idx:
-                return idx[ln]
+            bits = raw.get(ln)
+            if bits:
+                return self._decode(bits)
         return []
 
     def module_ids(self, rel: str) -> list:
         out = set(self.module_importers.get(rel, []))
         out.update(self.source_readers.get(rel, []))
-        for ids in self.line_index.get(rel, {}).values():
-            out.update(ids)
+        cached = self._mod_cache.get(rel)
+        if cached is None:
+            covered = set()
+            for bits in self._line_raw.get(rel, {}).values():
+                b = bits
+                while b:
+                    low = b & -b
+                    covered.add(self.id_order[low.bit_length() - 1])
+                    b ^= low
+            cached = covered
+            self._mod_cache[rel] = cached
+        out.update(cached)
         return list(out)
 
     def class_ids(self, rel: str, name: str) -> list:
@@ -97,6 +121,11 @@ class Maps:
 
     def unknown_loader_ids(self, rel: str) -> list:
         return list(self.unknown_loaders.get(rel, []))
+
+    def unknown_loaders(self, rel: str) -> list:
+        """Node ids of unknown-coverage tests that load `rel`. No-op when
+        unknown_loaders.json is absent/empty."""
+        return self.unknown_loader_ids(rel)
 
     def module_fallback_ids(self, rel: str) -> list:
         """Module-level selection: importers | source readers | class-map ids.

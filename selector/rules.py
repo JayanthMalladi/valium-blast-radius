@@ -57,6 +57,9 @@ class RuleEngine:
     def _unknown_loader_numbers(self, rel: str) -> set:
         return self._ids(self.maps.unknown_loader_ids(rel))
 
+    def _module_fallback_numbers(self, rel: str) -> set:
+        return self._ids(self.maps.module_fallback_ids(rel))
+
     # ------------------------------------------------------------------
     def _file(self, fp: P.FilePatch) -> set:
         rel = fp.path
