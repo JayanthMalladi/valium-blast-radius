@@ -170,9 +170,20 @@ class RuleEngine:
 
         cat = _classify(pristine, patched)
         if cat == "import_break":
-            return self._module_numbers(rel)
+            return self._full_suite_numbers()
         if cat == "comment_only":
             return self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
+        if patched is None:
+            # deletion handled above, guard
+            return self._full_suite_numbers()
+        # Unparseable patched text: a patch that produced Python-invalid text
+        # means the patch could not be mapped to executable statements.
+        if _safe_parse(patched) is None:
+            return self._full_suite_numbers()
+        # Unknown path under sqlglot/: pristine file is missing, so line maps
+        # and statement lookup are not possible.
+        if not pristine:
+            return self._full_suite_numbers()
 
         # CODE_CHANGE
         out = set()
