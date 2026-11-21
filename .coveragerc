@@ -1,0 +1,11 @@
+[run]
+source = sqlglot
+dynamic_context = test_function
+branch = false
+concurrency = thread
+omit =
+    sqlglot/_version.py
+    sqlglot/dataframe/*
+
+[report]
+show_missing = false

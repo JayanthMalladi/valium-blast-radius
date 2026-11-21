@@ -1,0 +1,9 @@
+[run]
+data_parallel = true
+data_context = test_function
+concurrency = thread
+source = sqlglot
+branch = false
+omit =
+    sqlglot/_version.py
+    sqlglot/dataframe/*
