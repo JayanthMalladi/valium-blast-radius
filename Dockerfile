@@ -4,31 +4,20 @@
 
 FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
-# Fetch the pinned sqlglot source as a tarball and extract it.
-RUN python3 -c "\
-import urllib.request, tarfile, io, os, hashlib; \
-url='https://github.com/tobymao/sqlglot/archive/eb11aec4be8cb2122afe713a4816662c3f0fb2fa.tar.gz'; \
-print('downloading', url); \
-with urllib.request.urlopen(url) as r: \
-    data = r.read(); \
-print('downloaded', len(data), 'bytes'); \
-with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tf: \
-    tf.extractall('/opt'); \
-print('extracted'); \
-# move the extracted tree to /opt/sqlglot and strip .git \
-src = '/opt/sqlglot-eb11aec4be8cb2122afe713a4816662c3f0fb2fa'; \
-os.makedirs('/opt', exist_ok=True); \
-if os.path.exists('/opt/sqlglot'): \
-    import shutil; shutil.rmtree('/opt/sqlglot'); \
-os.rename(src, '/opt/sqlglot'); \
-# drop .git noise if any
-import shutil; \
-for root, dirs, files in os.walk('/opt/sqlglot'): \
-    for d in list(dirs): \
-        if d == '.git': \
-            p = os.path.join(root, d); shutil.rmtree(p, ignore_errors=True); dirs.remove(d) \
-" \
- && test -f /opt/sqlglot/sqlglot/__init__.py
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG SQLGLOT_URL="https://github.com/tobymao/sqlglot/archive/eb11aec4be8cb2122afe713a4816662c3f0fb2fa.tar.gz"
+RUN python3 -c "import urllib.request; urllib.request.urlretrieve('${SQLGLOT_URL}', '/tmp/sqlglot.tar.gz')" \
+ && tar -xzf /tmp/sqlglot.tar.gz -C /opt \
+ && test -d /opt/sqlglot-eb11aec4be8cb2122afe713a4816662c3f0fb2fa \
+ && rm -rf /opt/sqlglot \
+ && mv /opt/sqlglot-eb11aec4be8cb2122afe713a4816662c3f0fb2fa /opt/sqlglot \
+ && test -f /opt/sqlglot/sqlglot/__init__.py \
+ && rm -f /tmp/sqlglot.tar.gz
 
 COPY selector /opt/selector
 COPY maps /opt/maps

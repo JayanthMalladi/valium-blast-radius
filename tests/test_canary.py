@@ -1,7 +1,9 @@
 """Unit tests for the coarse canary rule (fix 4)."""
 from __future__ import annotations
 
-import json, os, sys
+import json
+import os
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
