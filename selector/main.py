@@ -21,6 +21,7 @@ from .rules import RuleEngine
 DATA = os.environ.get("BR_DATA", "/data")
 MAPS_DIR = os.environ.get("BR_MAPS", "/app/maps")
 PRISTINE_DIR = os.environ.get("BR_PRISTINE", "/opt/sqlglot")
+RUN_NAME = os.environ.get("BR_DEBUG_RUN", "debug")
 
 
 def _pristine_files() -> dict:
@@ -68,6 +69,7 @@ def main() -> None:
         except Exception as exc:
             sys.stderr.write(f"[{cid}] selector error {exc!r}; full-suite fallback\n")
             workers = full_workers
+        engine.record_reasons(cid, set(n for w in workers for n in w))
         print(json.dumps({"commit": cid, "workers": workers}))
 
     ts = os.times()

@@ -1,4 +1,4 @@
-"""Stub-safe selection: full-suite fallback + optional unknown_loaders union."""
+"""Stub-safe selection: canary + unknown_loaders union."""
 import json
 import sys
 from pathlib import Path
@@ -31,7 +31,10 @@ def _engine(tmp_path: Path, extra: dict | None = None, line_coverage: str = "{}"
         "module_importers.json": {REL: ["a", "b"]},
         "source_readers.json": {REL: ["c"]},
         "class_uses.json": {REL + "::X": ["d"]},
-        "test_files.json": {},
+        "test_files.json": {
+            "tests/test_optimizer.py": ["c", "d"],
+            "tests/test_executor.py": ["e"],
+        },
         "fixture_map.json": {},
     }
     data.update(extra or {})
@@ -44,13 +47,12 @@ def _engine(tmp_path: Path, extra: dict | None = None, line_coverage: str = "{}"
     return RuleEngine(m, id_by_node, pristine)
 
 
-def test_stub_line_map_selects_full_suite(tmp_path):
-    # With empty line_coverage.json (stub mode), a code change must fall back
-    # to the FULL SUITE so that no failing test is missed. The
-    # module_importers map is first-loader only and is NOT used here.
+def test_stub_line_map_selects_canary(tmp_path):
+    # Empty line map -> canary (optimizer+executor) fires.
     engine = _engine(tmp_path)
     sel = engine.select_for_files(P.parse_patch(_patch_text()))
-    assert sel == set(engine.id_by_node.values()), sel
+    opt_exec = engine._opt_executor_numbers()
+    assert sel == opt_exec, sel
 
 
 def test_unknown_loaders_unioned_in(tmp_path):
@@ -58,7 +60,8 @@ def test_unknown_loaders_unioned_in(tmp_path):
         "unknown_loaders.json": {REL: ["e", "f"]},
     })
     sel = engine.select_for_files(P.parse_patch(_patch_text()))
-    assert sel == set(engine.id_by_node.values()), sel
+    opt_exec = engine._opt_executor_numbers()
+    assert sel == opt_exec | {5, 6}, sel
 
 
 def test_absent_unknown_loaders_is_noop(tmp_path):

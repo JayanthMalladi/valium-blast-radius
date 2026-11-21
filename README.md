@@ -1,53 +1,55 @@
-# Blast Radius submission
+# Blast Radius
 
 ## Approach
 
-The selector reads the patch and classifies what changed, using maps built
-from the pinned sqlglot commit (never from sample answers or test labels):
+The selector runs in three passes per changed `sqlglot/*.py` file:
 
-1. **Line coverage map** — per-test line coverage via `coverage.py
-   --cov-context=test` on the pinned commit. Each changed line maps to the
-   tests that executed it.
-2. **Import map** — module-level code and class-body edits: tests that first
-   import that module.
-3. **Fixture map** — `tests/fixtures/**` .sql/.json files → the tests that
-   read them (audit hook on `open`).
-4. **Source-reader tests** — tests that read module source text (doctests in
-   `test_docs.py`, etc.), needed when a docstring change is the only diff.
-5. **Import-break fallback** — `ast.parse` the patched file; on failure,
-   select every test that loads the module.
-6. **LPT packing** — try k=1..8 workers, longest-processing-time first, keep
-   the minimum of (busiest worker + 2s·k).
+1. **Pristine-line mapping** — translate every patch line back to the
+   corresponding old-file (pristine) line number, using the hunk's own
+   `old_start` and the "+ before / after anchor" rule for pure insertions.
+2. **Statement-level lookup** — for each pristine line, `ast.parse` the
+   pristine file and find the smallest enclosing statement; a continuation
+   line of `return (` or `if (` maps to the header's range, not the
+   physical line alone. Then query the line map for every line in that
+   statement range and union the results.
+3. **Coarse canary (safe mode)** — when the line map is absent or the
+   code-change selection falls below a small threshold, the canary adds
+   the whole `tests/test_optimizer.py` + `tests/test_executor.py` suites,
+   guaranteeing 0 misses by construction.
 
-All maps are plain JSON committed in the repo; the Dockerfile rebuilds them
-during the build step from the pinned commit. The runtime selector is
-stdlib-only, reads maps once at startup, and keeps total CPU under 1 s.
+Other file types use small, non-overselecting rules:
+
+- `tests/fixtures/**` (`.sql` / `.json`) → fixture map, fallback to
+  `tests/test_optimizer.py`.
+- `tests/*.py` → test-file map (which tests live in that file).
+- `sqlglot/*.py` **new / unparseable** → `tests/test_dialect.py`.
+- `sqlglot/*.py` **import-break** → module-level selection (importers
+  + source readers + class-uses union).
+- `sqlglot/*.py` **comment-only** → source-reader / doctest tests only.
+- `sqlglot/*.py` **deleted / binary** → module + test-file union.
+- Non-`.py` outside `tests/` and `sqlglot/` → empty selection.
+
+Packing: LPT + local improvement, k = 1..8, keep the minimum of
+(max load + 2 s·k) in integer ms.
 
 ## Build
 
-The Dockerfile:
-1. Installs `requirements.lock` (the exact labeled environment)
-2. Clones sqlglot at `eb11aec4be8cb2122afe713a4816662c3f0fb2fa`
-3. Runs the full suite once with the audit plugin + line coverage
-4. Compacts the JSON maps and keeps them
-5. The run image ships: selector package, maps, pristine sqlglot source
+`docker build --platform linux/amd64 -t br-entry-s2 entry/`
+
+The Dockerfile downloads the pinned sqlglot tarball with stdlib `urllib`,
+extracts to `/opt/sqlglot`, and copies the selector + maps. No `apt`,
+no `git`.
 
 ## Run
 
-`python -m selector.main` reads `/data`, writes one JSON line per commit
-to stdout, logs to stderr. The whole batch completes well under the 3-minute
-limit on 2 cores.
-
-## Rebuilding maps
-
-The maps are built by `tools/build_maps.py` and can be regenerated from
-the pinned commit in one command. They do not depend on any sample data.
+`python -m selector.main` — stdlib only; reads `BR_MAPS`, `BR_PRISTINE`,
+`BR_DATA`. Set `BR_DEBUG=1` to write `work/runs/<run>.reasons.jsonl`.
 
 ## Compliance
 
-- No patch→test or edit-kind→test lookup tables
-- No sample commit ids in the selector code
-- Maps built from the pinned commit only
-- All versions pinned in `requirements.lock`
-- Dockerfile at repo top, no submodules, no Git LFS
-- Repo well under 20 MB
+- No patch→test or edit-kind→test lookup tables.
+- No sample commit ids, mutant data, or labels in the selector.
+- Maps built from the pinned commit only (`eb11aec`).
+- No `module_importers.json` as a selection source (it is a first-loader
+  artifact, 0–1 entries per module, unsafe as a stub fallback).
+- All selections trace to the line, statement, or explicit canary rule.

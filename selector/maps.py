@@ -39,6 +39,11 @@ class Maps:
 
         def rd(name: str, default):
             p = os.path.join(self.dir, name)
+            gz = p + ".gz"
+            if os.path.exists(gz):
+                import gzip
+                with gzip.open(gz, "rt", encoding="utf-8") as f:
+                    return json.load(f)
             if os.path.exists(p):
                 with open(p, "r", encoding="utf-8") as f:
                     return json.load(f)
