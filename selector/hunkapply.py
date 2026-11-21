@@ -56,3 +56,34 @@ def _splice(lines: list[str], hunk, allow_fuzzy: bool):
     new_seg = [t for k, t in hunk.lines if k in (" ", "+")]
     s = max(0, min(expected, len(lines)))
     return lines[:s] + new_seg + lines[s + len(old_ctx):]
+
+
+def patch_applies(pristine_text: str | None, fp) -> bool:
+    """True when every hunk's old-side lines are present in `pristine_text` at
+    the hunk's own old_start (within the same fuzzy offset that _splice uses).
+
+    A patch whose hunk does not match the pristine file cannot be applied, so
+    its effect cannot be bounded from the maps; the caller must fall back to
+    the full suite."""
+    if fp.is_binary:
+        return False
+    if pristine_text is None:
+        return fp.is_new      # new file: nothing to match on the old side
+    lines = pristine_text.splitlines()
+    for hunk in fp.hunks:
+        old_ctx = [t for k, t in hunk.lines if k in (" ", "-")]
+        if not old_ctx:
+            continue
+        expected = hunk.old_start - 1
+        positions = [expected]
+        for d in range(1, 41):
+            positions += [expected + d, expected - d]
+            if d > 20:
+                break
+        for start in positions:
+            if 0 <= start and start + len(old_ctx) <= len(lines) and all(
+                    lines[start + i] == c for i, c in enumerate(old_ctx)):
+                break
+        else:
+            return False
+    return True

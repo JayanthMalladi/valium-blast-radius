@@ -1,11 +1,19 @@
 """Worker packing: minimize busiest-worker recorded seconds + 2 s per worker.
 
-For a given selection of test numbers with integer millisecond durations,
-try k = 1..8 workers, run longest-processing-time-first (LPT) with a few
-improvement swaps, and return the workers list (empty if selection empty)
-for the k that minimizes makespan + 2000*k ms.
+For a selection of test numbers with integer-millisecond durations, seed each
+k = 1..8 with longest-processing-time-first (LPT), then run a local-improvement
+pass (best single move or swap that lowers the makespan) until it stops
+improving, and keep the k that minimizes makespan + 2000*k ms.
+
+All arithmetic is in integer milliseconds (the scorer's unit). An empty
+selection returns []; a non-empty selection always returns at least one worker
+so that its tests are counted (zero-duration tests included) - dropping a
+selected test would risk missing a failure.
 """
 from __future__ import annotations
+
+# cap local-improvement sweeps; plenty for <=1620 tests, cheap for the k=1..8 loop
+_MAX_SWEEPS = 40
 
 
 def pack(tests: list[int], durations_ms: dict[int, int]) -> list[list[int]]:
@@ -13,19 +21,15 @@ def pack(tests: list[int], durations_ms: dict[int, int]) -> list[list[int]]:
     if not tests:
         return []
     loads = [durations_ms.get(t, 0) for t in tests]
-    total = sum(loads)
-    if total == 0:
-        # all selected tests are zero-duration: one worker keeps them counted
-        # but costs 2 s; empty selection would cost 0, so drop them.
-        return []
 
     best: tuple[int, list[list[int]]] | None = None
-    for k in range(1, 9):
+    for k in range(1, min(8, len(tests)) + 1):
         workers, load = _lpt(loads, tests, k)
-        makespan = _improve(workers, load, durations_ms, k) + 2000 * k
+        _improve(workers, load, durations_ms, k)
+        makespan = max(load) + 2000 * k
         if best is None or makespan < best[0]:
-            best = (makespan, [w for w in workers])
-    return best[1] if best else []
+            best = (makespan, [list(w) for w in workers])
+    return best[1]
 
 
 def _lpt(loads: list[int], tests: list[int], k: int) -> tuple[list[list[int]], list[int]]:
@@ -39,25 +43,65 @@ def _lpt(loads: list[int], tests: list[int], k: int) -> tuple[list[list[int]], l
     return workers, load
 
 
-def _improve(workers: list[list[int]], load: list[int], durations: dict[int, int], k: int) -> int:
-    """One pass of pair-improvement: move a test from the busiest worker to a
-    non-busiest worker if it strictly reduces the makespan. Repeated until no
-    improvement. Cheap for <=1620 tests."""
+def _improve(workers: list[list[int]], load: list[int],
+             durations: dict[int, int], k: int) -> None:
+    """In-place local improvement: repeatedly apply the single best move or
+    swap that strictly lowers the makespan, until no such step remains."""
     if k == 1:
-        return load[0]
-    improved = True
-    while improved:
-        improved = False
+        return
+    for _ in range(_MAX_SWEEPS):
+        cur = max(load)
         busiest = max(range(k), key=lambda j: load[j])
-        for idx, t in list(enumerate(workers[busiest])):
+
+        best_newmax = cur
+        best_move: tuple[int, int] | None = None        # (i in busiest, target j)
+        best_swap: tuple[int, int, int] | None = None   # (i in busiest, j, jj in j)
+
+        for i, t in enumerate(workers[busiest]):
             d = durations.get(t, 0)
-            target = min((j for j in range(k) if j != busiest), key=lambda j: load[j])
-            if load[target] + d < load[busiest]:
-                workers[busiest].pop(idx)
-                load[busiest] -= d
-                workers[target].append(t)
-                load[target] += d
-                improved = True
-                busiest = max(range(k), key=lambda j: load[j])
-                break
-    return load[busiest] if k else 0
+            for j in range(k):
+                if j == busiest:
+                    continue
+                nm = _newmax(load, busiest, j, -d, d)
+                if nm < best_newmax:
+                    best_newmax, best_move, best_swap = nm, (i, j), None
+        for i, t in enumerate(workers[busiest]):
+            d1 = durations.get(t, 0)
+            for j in range(k):
+                if j == busiest:
+                    continue
+                for jj, t2 in enumerate(workers[j]):
+                    d2 = durations.get(t2, 0)
+                    if d2 >= d1:
+                        continue
+                    nm = _newmax(load, busiest, j, d2 - d1, d1 - d2)
+                    if nm < best_newmax:
+                        best_newmax, best_move, best_swap = nm, None, (i, j, jj)
+
+        if best_move is not None:
+            i, j = best_move
+            t = workers[busiest].pop(i)
+            workers[j].append(t)
+            d = durations.get(t, 0)
+            load[busiest] -= d
+            load[j] += d
+        elif best_swap is not None:
+            i, j, jj = best_swap
+            t1 = workers[busiest][i]
+            t2 = workers[j][jj]
+            workers[busiest][i] = t2
+            workers[j][jj] = t1
+            load[busiest] += durations.get(t2, 0) - durations.get(t1, 0)
+            load[j] += durations.get(t1, 0) - durations.get(t2, 0)
+        else:
+            return
+
+
+def _newmax(load: list[int], a: int, b: int, delta_a: int, delta_b: int) -> int:
+    """Makespan after adding delta_a to load[a] and delta_b to load[b]."""
+    m = 0
+    for x in range(len(load)):
+        v = load[x] + (delta_a if x == a else delta_b if x == b else 0)
+        if v > m:
+            m = v
+    return m

@@ -1,4 +1,4 @@
-"""Unit tests for the coarse canary rule (fix 4)."""
+"""Unit tests for the coarse canary rule."""
 from __future__ import annotations
 
 import json
@@ -12,16 +12,17 @@ from selector.rules import RuleEngine
 from selector.maps import Maps
 
 REL = "sqlglot/opt.py"
+PRISTINE = "x = 1\ny = 2\nz = 3\n"
 
 
 def _patch(mod_path=REL):
+    # replaces pristine line 2; the hunk's old-side context matches PRISTINE
     return """diff --git a/{rel} b/{rel}
 --- a/{rel}
 +++ b/{rel}
-@@ -1,3 +1,3 @@ def f():
-     x = 1
--    y = 2
-     return x
+@@ -2,1 +2,1 @@
+-y = 2
++z = 2
 """.format(rel=mod_path)
 
 
@@ -29,9 +30,7 @@ def _engine(maps_dir, *, extra=None):
     data = {
         "id_order.json": ["a", "b", "c", "d", "e", "f"],
         "line_coverage.json": {},
-        "module_importers.json": {},
         "source_readers.json": {},
-        "class_uses.json": {},
         "test_files.json": {},
         "fixture_map.json": {},
     }
@@ -44,7 +43,7 @@ def _engine(maps_dir, *, extra=None):
     m = Maps(maps_dir)
     m.load()
     id_by_node = {nid: i + 1 for i, nid in enumerate(m.id_order)}
-    pristine = {REL: "x = 1\ny = 2\n"}
+    pristine = {REL: PRISTINE}
     return RuleEngine(m, id_by_node, pristine)
 
 
@@ -69,10 +68,10 @@ def test_canary_does_not_fire_on_comment_only(tmp_path):
     patch = """diff --git a/{rel} b/{rel}
 --- a/{rel}
 +++ b/{rel}
-@@ -1,2 +1,2 @@ def f():
-     x = 1  # hi
--    y = 2
-     return x
+@@ -2,1 +2,2 @@
+-y = 2
++y = 2
++# a comment
 """.format(rel=REL)
     engine = _engine(str(tmp_path))
     sel = engine.select_for_files(P.parse_patch(patch))

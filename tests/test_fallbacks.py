@@ -1,6 +1,5 @@
-"""Safe fallbacks (fix 3): unparseable patched text and unknown paths
-under sqlglot/ select the FULL SUITE. module_importers.json is a first-loader
-artifact and is never a selection source.
+"""Safe fallbacks (fix 3): any change whose effect cannot be bounded by the
+maps selects the FULL SUITE.
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ from selector.maps import Maps
 from selector.rules import RuleEngine
 
 REL = "sqlglot/helper.py"
+PRISTINE = "x = 1\ny = 2\n"
 
 
 def _maps_dir(tmp_path: Path, line_coverage: dict | None = None) -> Path:
@@ -21,7 +21,7 @@ def _maps_dir(tmp_path: Path, line_coverage: dict | None = None) -> Path:
     d.mkdir()
     data = {
         "id_order.json": ["a", "b", "c", "d", "e", "f", "g", "h"],
-        "module_importers.json": {REL: ["a", "b"]},
+        # module_importers.json is no longer a selection source
         "source_readers.json": {REL: ["c"]},
         "test_files.json": {
             "tests/test_optimizer.py": ["c", "d"],
@@ -41,7 +41,7 @@ def _engine(tmp_path: Path, line_coverage: dict | None = None,
     m = Maps(str(_maps_dir(tmp_path, line_coverage)))
     m.load()
     id_by_node = {nid: i + 1 for i, nid in enumerate(m.id_order)}
-    return RuleEngine(m, id_by_node, pristine if pristine is not None else {REL: "x = 1\n"})
+    return RuleEngine(m, id_by_node, pristine if pristine is not None else {REL: PRISTINE})
 
 
 def _full(engine: RuleEngine) -> set:
@@ -52,40 +52,35 @@ def test_import_break_selects_full_suite(tmp_path):
     patch = f"""diff --git a/{REL} b/{REL}
 --- a/{REL}
 +++ b/{REL}
-@@ -1,2 +1,2 @@
- x = 1
+@@ -2,1 +2,1 @@
 -y = 2
 +def f(:
-     pass
 """
-    engine = _engine(tmp_path, pristine={REL: "x = 1\ny = 2\n"})
+    engine = _engine(tmp_path)
     assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
 
 
-def test_comment_only_uses_readers_not_full_suite(tmp_path):
+def test_deleted_sqlglot_py_selects_full_suite(tmp_path):
     patch = f"""diff --git a/{REL} b/{REL}
+deleted file mode 100644
+index abcdef..0000000
 --- a/{REL}
-+++ b/{REL}
-@@ -1,2 +1,3 @@
- x = 1
-+# a comment
- y = 2
-"""
-    engine = _engine(tmp_path, pristine={REL: "x = 1\ny = 2\n"})
-    sel = engine.select_for_files(P.parse_patch(patch))
-    assert sel == {3}                   # source reader only
-
-
-def test_non_py_outside_tests_and_sqlglot_selects_nothing(tmp_path):
-    patch = """diff --git a/docs/notes.md b/docs/notes.md
---- a/docs/notes.md
-+++ b/docs/notes.md
-@@ -1,1 +1,2 @@
- hello
-+world
++++ /dev/null
+@@ -1,2 +0,0 @@
+-x = 1
+-y = 2
 """
     engine = _engine(tmp_path)
-    assert engine.select_for_files(P.parse_patch(patch)) == set()
+    assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
+
+
+def test_binary_py_selects_full_suite(tmp_path):
+    patch = f"""diff --git a/{REL} b/{REL}
+new file mode 100644
+Binary files /dev/null and b/{REL} differ
+"""
+    engine = _engine(tmp_path)
+    assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
 
 
 def test_unparseable_patched_text_selects_full_suite(tmp_path):
@@ -113,18 +108,40 @@ def test_unknown_path_under_sqlglot_selects_full_suite(tmp_path):
     assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
 
 
-def test_module_importers_does_not_drive_selection(tmp_path):
-    # module_importers should not be used as a selection source for fallbacks.
+def test_mismatched_hunk_selects_full_suite(tmp_path):
+    # A patch whose hunk does not match the pristine file.
     patch = f"""diff --git a/{REL} b/{REL}
 --- a/{REL}
 +++ b/{REL}
-@@ -1,2 +1,2 @@
- x = 1
--y = 2
-+def f(:
-     pass
+@@ -40,2 +40,2 @@
+ totally = different
++here = 1
 """
-    engine = _engine(tmp_path, pristine={REL: "x = 1\ny = 2\n"})
+    engine = _engine(tmp_path)
+    assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
+
+
+def test_comment_only_uses_readers_not_full_suite(tmp_path):
+    patch = f"""diff --git a/{REL} b/{REL}
+--- a/{REL}
++++ b/{REL}
+@@ -1,2 +1,3 @@
+ x = 1
++# a comment
+ y = 2
+"""
+    engine = _engine(tmp_path)
     sel = engine.select_for_files(P.parse_patch(patch))
-    # full suite is selected; the two ids in module_importers are irrelevant
-    assert {1, 2} < sel
+    assert sel == {3}                   # source reader only
+
+
+def test_non_py_outside_tests_and_sqlglot_selects_nothing(tmp_path):
+    patch = """diff --git a/docs/notes.md b/docs/notes.md
+--- a/docs/notes.md
++++ b/docs/notes.md
+@@ -1,1 +1,2 @@
+ hello
++world
+"""
+    engine = _engine(tmp_path)
+    assert engine.select_for_files(P.parse_patch(patch)) == set()

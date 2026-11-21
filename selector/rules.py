@@ -3,6 +3,8 @@
 All lookups return node ids; the runtime layer maps them to test numbers.
 BR_DEBUG=1 writes `work/runs/<run>.reasons.jsonl`:
   one JSON line per commit: {"commit": cid, "reasons": [{"test": <number>, "line": "<module>:<pristine line>", "rule": "<why selected>"}]}
+BR_NO_CANARY=1 disables the coarse optimizer+executor canary (used to measure
+the precise line-map + dialect-family rules alone).
 """
 from __future__ import annotations
 import ast
@@ -10,7 +12,7 @@ import json
 import os
 
 from . import patch as P
-from .hunkapply import apply_file_patch
+from .hunkapply import apply_file_patch, patch_applies
 from .maps import Maps
 from .pristine_lines import changed_pristine_lines
 from .statement import statement_ranges
@@ -71,6 +73,7 @@ class RuleEngine:
         self.id_by_node = id_by_node
         self.pristine = pristine_files
         self._debug = os.environ.get("BR_DEBUG") == "1"
+        self._no_canary = os.environ.get("BR_NO_CANARY") == "1"
         self._reasons: list[dict] = []
         self._opt_exec_ids: set[int] | None = None
 
@@ -97,8 +100,8 @@ class RuleEngine:
     def _line_numbers(self, rel: str, ln: int) -> set:
         return self._ids(self.maps.line_ids(rel, ln))
 
-    def _module_numbers(self, rel: str) -> set:
-        return self._ids(self.maps.module_ids(rel))
+    def _family_numbers(self, rel: str) -> set:
+        return self._ids(self.maps.family_ids(rel))
 
     def _testfile_numbers(self, rel: str) -> set:
         return self._ids(self.maps.testfile_ids(rel))
@@ -139,17 +142,19 @@ class RuleEngine:
     def _file(self, fp: P.FilePatch) -> set:
         rel = fp.path
         if fp.is_binary:
-            out = set()
+            # A source file replaced by a binary blob cannot be bounded by the
+            # maps: any importer can break. Safe fallback: full suite.
             if rel.endswith(".py") and rel.startswith("sqlglot/"):
-                out |= self._module_numbers(rel)
-            else:
-                out |= self._fixture_numbers(rel)
-            return out
+                return self._full_suite_numbers()
+            return set()
         if fp.is_deleted:
-            out = self._module_numbers(rel) | self._testfile_numbers(rel)
-            if not out and rel.endswith(".py"):
-                out = self._module_numbers(rel)
-            return out
+            if rel.startswith("sqlglot/") and rel.endswith(".py"):
+                return self._full_suite_numbers()
+            if rel.startswith("tests/") and rel.endswith(".py"):
+                return self._testfile_numbers(rel)
+            if rel.startswith("tests/fixtures/") or rel.endswith((".sql", ".json")):
+                return self._fixture_numbers(rel) or self._testfile_numbers("tests/test_optimizer.py")
+            return set()
         if rel.startswith("tests/"):
             if rel.endswith(".py"):
                 return self._testfile_numbers(rel)
@@ -165,36 +170,39 @@ class RuleEngine:
             return self._new_source(fp, rel)
 
         pristine = self.pristine.get(rel, "")
+        # Unknown path under sqlglot/: the pristine tree does not contain this
+        # file, so no statement or line lookup is possible. Safe fallback.
+        if not pristine:
+            return self._full_suite_numbers()
+
         patched = apply_file_patch(pristine, fp)
-        changed = changed_pristine_lines(fp)
+        if patched is None:
+            return self._full_suite_numbers()
 
         cat = _classify(pristine, patched)
         if cat == "import_break":
             return self._full_suite_numbers()
         if cat == "comment_only":
             return self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
-        if patched is None:
-            # deletion handled above, guard
+
+        # A patch whose hunks do not match the pristine file cannot be applied
+        # to the pinned source, so its effect cannot be bounded.
+        if not patch_applies(pristine, fp):
             return self._full_suite_numbers()
-        # Unparseable patched text: a patch that produced Python-invalid text
-        # means the patch could not be mapped to executable statements.
+        # Patched text that is not valid Python breaks the import chain.
         if _safe_parse(patched) is None:
-            return self._full_suite_numbers()
-        # Unknown path under sqlglot/: pristine file is missing, so line maps
-        # and statement lookup are not possible.
-        if not pristine:
             return self._full_suite_numbers()
 
         # CODE_CHANGE
-        out = set()
-        if self.maps.has_line_coverage and pristine and patched:
+        changed = changed_pristine_lines(fp)
+        out: set = set()
+        if self.maps.has_line_coverage:
             try:
                 tree = ast.parse(pristine)
             except Exception:
                 tree = None
             if tree:
-                ranges = statement_ranges(tree, changed)
-                for a, b in ranges:
+                for a, b in statement_ranges(tree, changed):
                     for ln in range(a, b + 1):
                         for num in self._line_numbers(rel, ln):
                             if self._debug:
@@ -205,10 +213,24 @@ class RuleEngine:
                                 })
                             out.add(num)
 
-        # Coarse canary: when line coverage is missing or selection is
-        # "thin" (below threshold), add optimizer+executor suites.
-        # This is the Section-7 safe-mode fallback enabler.
-        if len(out) < _THIN_CANARY:
+        # Dialect-family rule: sibling files of the same dialect module
+        # (generators/parsers/typing/<stem>.py) share the dialect's behavior.
+        # Every test that executed any sibling line at the pinned commit is
+        # potentially affected.
+        fam = self._family_numbers(rel)
+        if fam:
+            out |= fam
+            if self._debug:
+                for num in fam:
+                    self._reasons.append({
+                        "commit": "", "test": num,
+                        "line": rel,
+                        "rule": "dialect-family",
+                    })
+
+        # Coarse canary: when the precise selection is thin, add the
+        # optimizer+executor suites. Safe-mode fallback enabler.
+        if not self._no_canary and len(out) < _THIN_CANARY:
             out |= self._opt_executor_numbers()
 
         return out | self._unknown_loader_numbers(rel)
@@ -216,7 +238,8 @@ class RuleEngine:
     def _new_source(self, fp: P.FilePatch, rel: str) -> set:
         text = apply_file_patch(None, fp) or ""
         if _safe_parse(text) is None:
-            return self._testfile_numbers("tests/test_optimizer.py") | self._testfile_numbers("tests/test_executor.py")
+            # Unparseable new .py under sqlglot/: the import chain can break.
+            return self._full_suite_numbers()
         if rel.startswith("sqlglot/dialects/"):
             return self._testfile_numbers("tests/test_dialect.py")
         return set()

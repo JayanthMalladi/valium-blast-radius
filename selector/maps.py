@@ -4,7 +4,6 @@ Maps are keyed by pytest node id, built from the pinned sqlglot commit.
 Files in the maps dir:
   line_coverage.json      rel path -> {str(line): hex_bitset}
   id_order.json           [nodeid,...]   bit i = this node id
-  module_importers.json   rel path -> [nodeid,...]
   class_uses.json         "rel::Class" -> [nodeid,...]
   fixture_map.json        "tests/...file" -> [nodeid,...]
   source_readers.json     "sqlglot/...py" -> [nodeid,...]
@@ -16,14 +15,16 @@ import os
 
 MAPS_DIR = os.environ.get("BR_MAPS", "/app/maps")
 
+# The sqlglot dialect-family directories. Files with the same module stem
+# across these directories form one family (e.g. dialects/tsql.py,
+# generators/tsql.py, parsers/tsql.py, typing/tsql.py).
+_FAMILY_DIRS = ("sqlglot/dialects/", "sqlglot/generators/", "sqlglot/parsers/", "sqlglot/typing/")
+
 
 class Maps:
     def __init__(self, maps_dir: str = MAPS_DIR):
         self.dir = maps_dir
-        self.line_index: dict = {}          # reserved; line data lives in _line_raw
         self._line_raw: dict = {}           # path -> {int(line): int_bitset}
-        self._mod_cache: dict = {}
-        self.module_importers: dict = {}
         self.class_uses: dict = {}
         self.fixture_map: dict = {}
         self.source_readers: dict = {}
@@ -31,6 +32,8 @@ class Maps:
         self.unknown_loaders: dict = {}
         self.has_line_coverage: bool = False   # set in load()
         self.id_order: list = []
+        self._family_index: dict = {}         # stem -> [rel paths with coverage]
+        self._family_cache: dict = {}         # stem -> set of node ids
         self._loaded = False
 
     def load(self) -> None:
@@ -64,7 +67,6 @@ class Maps:
                     raw[int(ln_s)] = bits
             if raw:
                 self._line_raw[path] = raw
-        self.module_importers = rd("module_importers.json", {})
         self.class_uses = rd("class_uses.json", {})
         self.fixture_map = rd("fixture_map.json", {})
         self.source_readers = rd("source_readers.json", {})
@@ -74,6 +76,13 @@ class Maps:
         # other maps. Absent or empty file is a no-op.
         self.unknown_loaders = rd("unknown_loaders.json", {})
         self.has_line_coverage = bool(self._line_raw)
+        # Dialect-family index: which family directories hold which stems.
+        for path in self._line_raw:
+            for prefix in _FAMILY_DIRS:
+                if path.startswith(prefix):
+                    stem = os.path.basename(path)
+                    self._family_index.setdefault(stem, []).append(path)
+                    break
         self._loaded = True
 
     # -- selectors use these; all return sets of node ids --
@@ -95,22 +104,31 @@ class Maps:
                 return self._decode(bits)
         return []
 
-    def module_ids(self, rel: str) -> list:
-        out = set(self.module_importers.get(rel, []))
-        out.update(self.source_readers.get(rel, []))
-        cached = self._mod_cache.get(rel)
+    def dialect_family(self, rel: str) -> list:
+        """Sibling files of `rel` in its dialect family: same module stem,
+        across sqlglot/{dialects,generators,parsers,typing}/. Empty when
+        `rel` is not a family file or has no covered siblings."""
+        stem = os.path.basename(rel)
+        out = [p for p in self._family_index.get(stem, []) if p != rel]
+        return [p for p in out if p in self._line_raw]
+
+    def family_ids(self, rel: str) -> list:
+        """Node ids of every test that executed any line of any sibling in
+        `rel`'s dialect family, at the pinned commit. Decoded lazily and
+        cached per stem."""
+        stem = os.path.basename(rel)
+        cached = self._family_cache.get(stem)
         if cached is None:
-            covered = set()
-            for bits in self._line_raw.get(rel, {}).values():
-                b = bits
-                while b:
-                    low = b & -b
-                    covered.add(self.id_order[low.bit_length() - 1])
-                    b ^= low
-            cached = covered
-            self._mod_cache[rel] = cached
-        out.update(cached)
-        return list(out)
+            cached = set()
+            for p in self._family_index.get(stem, []):
+                for bits in self._line_raw.get(p, {}).values():
+                    b = bits
+                    while b:
+                        low = b & -b
+                        cached.add(self.id_order[low.bit_length() - 1])
+                        b ^= low
+            self._family_cache[stem] = cached
+        return list(cached)
 
     def class_ids(self, rel: str, name: str) -> list:
         return list(self.class_uses.get(f"{rel}::{name}", []))
@@ -132,19 +150,6 @@ class Maps:
         unknown_loaders.json is absent/empty."""
         return self.unknown_loader_ids(rel)
 
-    def module_fallback_ids(self, rel: str) -> list:
-        """Module-level selection: importers | source readers | class-map ids.
-        NOTE: module_importers.json is a FIRST-LOADER map (one importer per
-        module), not exhaustive. Do NOT use this as a safe stub fallback."""
-        out = set(self.module_importers.get(rel, []))
-        out.update(self.source_readers.get(rel, []))
-        prefix = rel + "::"
-        for key, ids in self.class_uses.items():
-            if key.startswith(prefix):
-                out.update(ids)
-        return list(out)
-
     def all_node_ids(self) -> list:
-        """Every node id in id_order (the full test suite). Used only as a
-        safe stub-mode fallback when line_coverage.json is empty."""
+        """Every node id in id_order (the full test suite)."""
         return list(self.id_order)
