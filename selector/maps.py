@@ -4,7 +4,6 @@ Maps are keyed by pytest node id, built from the pinned sqlglot commit.
 Files in the maps dir:
   line_coverage.json      rel path -> {str(line): hex_bitset}
   id_order.json           [nodeid,...]   bit i = this node id
-  class_uses.json         "rel::Class" -> [nodeid,...]
   fixture_map.json        "tests/...file" -> [nodeid,...]
   source_readers.json     "sqlglot/...py" -> [nodeid,...]
   test_files.json         "tests/...py" -> [nodeid,...]
@@ -25,7 +24,6 @@ class Maps:
     def __init__(self, maps_dir: str = MAPS_DIR):
         self.dir = maps_dir
         self._line_raw: dict = {}           # path -> {int(line): int_bitset}
-        self.class_uses: dict = {}
         self.fixture_map: dict = {}
         self.source_readers: dict = {}
         self.test_files: dict = {}
@@ -67,7 +65,6 @@ class Maps:
                     raw[int(ln_s)] = bits
             if raw:
                 self._line_raw[path] = raw
-        self.class_uses = rd("class_uses.json", {})
         self.fixture_map = rd("fixture_map.json", {})
         self.source_readers = rd("source_readers.json", {})
         self.test_files = rd("test_files.json", {})
@@ -129,9 +126,6 @@ class Maps:
                         b ^= low
             self._family_cache[stem] = cached
         return list(cached)
-
-    def class_ids(self, rel: str, name: str) -> list:
-        return list(self.class_uses.get(f"{rel}::{name}", []))
 
     def fixture_ids(self, rel: str) -> list:
         return list(self.fixture_map.get(rel, []))
