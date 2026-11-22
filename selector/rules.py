@@ -174,6 +174,43 @@ def _test_importers(pristine: dict[str, str]) -> dict[str, set[str]]:
     return out
 
 
+def _class_setup_paths(pristine: dict[str, str]) -> dict[tuple[str, str], set[str]]:
+    """Path fragments read in each test class's setUpClass. Coverage maps
+    credit a file opened there to the first test the class ran, but every
+    test in the class depends on it."""
+    out: dict[tuple[str, str], set[str]] = {}
+    for rel, src in pristine.items():
+        if not (rel.startswith("tests/") and rel.endswith(".py")):
+            continue
+        tree = _safe_parse(src)
+        if tree is None:
+            continue
+        consts: dict[str, set[str]] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                strs = {c.value for c in ast.walk(node.value)
+                        if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        consts[t.id] = strs
+        for cls in tree.body:
+            if not isinstance(cls, ast.ClassDef):
+                continue
+            for fn in cls.body:
+                if isinstance(fn, ast.FunctionDef) and fn.name == "setUpClass":
+                    frags = set()
+                    for n in ast.walk(fn):
+                        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                            frags.add(n.value)
+                        elif isinstance(n, ast.Name):
+                            frags |= consts.get(n.id, set())
+                    frags = {f.strip("/") for f in frags if "/" in f or "." in f}
+                    frags = {f for f in frags if len(f) >= 4}
+                    if frags:
+                        out[(rel, cls.name)] = frags
+    return out
+
+
 class RuleEngine:
     def __init__(self, maps: Maps, id_by_node: dict[str, int],
                  pristine_files: dict[str, str]) -> None:
@@ -191,6 +228,7 @@ class RuleEngine:
         self._opt_exec_ids: set[int] | None = None
         self._heap_observer_ids = _heap_observers(pristine_files, id_by_node)
         self._test_importers = _test_importers(pristine_files)
+        self._class_setup_paths = _class_setup_paths(pristine_files)
 
     # ------------------------------------------------------------------
     def _ids(self, node_ids: list) -> set:
@@ -229,7 +267,12 @@ class RuleEngine:
         return out
 
     def _fixture_numbers(self, rel: str) -> set:
-        return self._ids(self.maps.fixture_ids(rel))
+        out = self._ids(self.maps.fixture_ids(rel))
+        for (test_rel, cls), frags in self._class_setup_paths.items():
+            if any(f in rel for f in frags):
+                marker = f"::{cls}::"
+                out |= self._ids([n for n in self.maps.testfile_ids(test_rel) if marker in n])
+        return out
 
     def _reader_numbers(self, rel: str) -> set:
         return self._ids(self.maps.reader_ids(rel))

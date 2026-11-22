@@ -218,3 +218,35 @@ def test_edit_to_imported_test_module_selects_its_importers(tmp_path):
 def test_edit_to_unimported_test_module_selects_only_itself(tmp_path):
     engine = _importer_engine(tmp_path)
     assert engine.select_for_files(_edit("tests/test_parser.py")) == {engine.id_by_node["g"]}
+
+
+def _setup_engine(tmp_path: Path) -> RuleEngine:
+    exec_src = (
+        'DIR_TPCH = FIXTURES_DIR + "/optimizer/tpc-h/"\n'
+        "class TestExecutor(unittest.TestCase):\n"
+        "    @classmethod\n"
+        "    def setUpClass(cls):\n"
+        '        cls.rows = open(DIR_TPCH + "lineitem.csv.gz")\n'
+        "    def test_one(self):\n        pass\n"
+    )
+    engine = _engine(tmp_path, pristine={REL: PRISTINE, "tests/test_executor.py": exec_src})
+    engine.maps.test_files["tests/test_executor.py"] = [
+        "tests/test_executor.py::TestExecutor::test_a", "tests/test_executor.py::TestExecutor::test_b"]
+    engine.maps.fixture_map.update({
+        "tests/fixtures/optimizer/tpc-h/lineitem.csv.gz": ["a"],
+        "tests/fixtures/pretty.sql": ["g"],
+    })
+    engine.id_by_node.update({"tests/test_executor.py::TestExecutor::test_a": 20,
+                              "tests/test_executor.py::TestExecutor::test_b": 21})
+    return engine
+
+
+def test_fixture_read_in_setupclass_selects_whole_class(tmp_path):
+    engine = _setup_engine(tmp_path)
+    got = engine.select_for_files(_edit("tests/fixtures/optimizer/tpc-h/lineitem.csv.gz"))
+    assert {20, 21, engine.id_by_node["a"]} <= got
+
+
+def test_fixture_not_read_in_setupclass_keeps_its_map(tmp_path):
+    engine = _setup_engine(tmp_path)
+    assert engine.select_for_files(_edit("tests/fixtures/pretty.sql")) == {engine.id_by_node["g"]}
