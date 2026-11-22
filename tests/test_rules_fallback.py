@@ -49,6 +49,7 @@ def _engine(tmp_path: Path, extra: dict | None = None, line_coverage: str = "{}"
 def test_stub_line_map_selects_canary(tmp_path):
     # Empty line map -> canary (optimizer+executor) fires.
     engine = _engine(tmp_path)
+    engine._canary = True   # BR_CANARY=1
     sel = engine.select_for_files(P.parse_patch(_patch_text()))
     opt_exec = engine._opt_executor_numbers()
     assert sel == opt_exec, sel
@@ -58,6 +59,7 @@ def test_unknown_loaders_unioned_in(tmp_path):
     engine = _engine(tmp_path, {
         "unknown_loaders.json": {REL: ["e", "f"]},
     })
+    engine._canary = True   # BR_CANARY=1
     sel = engine.select_for_files(P.parse_patch(_patch_text()))
     opt_exec = engine._opt_executor_numbers()
     assert sel == opt_exec | {5, 6}, sel

@@ -39,7 +39,9 @@ def _engine(tmp_path: Path, line_coverage: dict | None = None,
     pristine = {REL: PRISTINE}
     if extra_pristine:
         pristine.update(extra_pristine)
-    return RuleEngine(m, id_by_node, pristine)
+    eng = RuleEngine(m, id_by_node, pristine)
+    eng._family = True   # BR_FAMILY=1 (off by default)
+    return eng
 
 
 def test_family_sibling_file_lines_are_selected(tmp_path):
@@ -86,3 +88,9 @@ def test_family_is_by_dialect_stem_not_directory(tmp_path):
     sel = engine.select_for_files(P.parse_patch(patch))
     assert sel == {4, 5}, sel
     assert 6 not in sel
+
+
+def test_family_off_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("BR_FAMILY", raising=False)
+    eng = _engine(tmp_path)
+    assert RuleEngine(eng.maps, eng.id_by_node, eng.pristine)._family is False

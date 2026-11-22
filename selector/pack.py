@@ -1,9 +1,13 @@
 """Worker packing: minimize busiest-worker recorded seconds + 2 s per worker.
 
-For a selection of test numbers with integer-millisecond durations, seed each
-k = 1..8 with longest-processing-time-first (LPT), then run a local-improvement
-pass (best single move or swap that lowers the makespan) until it stops
-improving, and keep the k that minimizes makespan + 2000*k ms.
+For a selection of test numbers with integer-millisecond durations, choose the
+k = 1..8 that minimizes `max(worker load) + 2000*k` ms.
+
+- For small selections (<= 10 tests) the optimum is found exactly by
+  enumerating set partitions (restricted growth strings, capped at 8 bins).
+- For large selections each k is seeded with longest-processing-time-first
+  (LPT) and improved with a local pass (best single move or swap that lowers
+  the makespan) until it stops improving.
 
 All arithmetic is in integer milliseconds (the scorer's unit). An empty
 selection returns []; a non-empty selection always returns at least one worker
@@ -14,14 +18,17 @@ from __future__ import annotations
 
 # cap local-improvement sweeps; plenty for <=1620 tests, cheap for the k=1..8 loop
 _MAX_SWEEPS = 40
+# selections up to this size are packed exactly (set-partition enumeration)
+_EXACT_MAX = 10
 
 
 def pack(tests: list[int], durations_ms: dict[int, int]) -> list[list[int]]:
     """Return worker lists for the best k in 1..8 (or [] for empty input)."""
     if not tests:
         return []
+    if len(tests) <= _EXACT_MAX:
+        return _pack_exact(tests, durations_ms)
     loads = [durations_ms.get(t, 0) for t in tests]
-
     best: tuple[int, list[list[int]]] | None = None
     for k in range(1, min(8, len(tests)) + 1):
         workers, load = _lpt(loads, tests, k)
@@ -30,6 +37,45 @@ def pack(tests: list[int], durations_ms: dict[int, int]) -> list[list[int]]:
         if best is None or makespan < best[0]:
             best = (makespan, [list(w) for w in workers])
     return best[1]
+
+
+def _pack_exact(tests: list[int], durations_ms: dict[int, int]) -> list[list[int]]:
+    """Exact min over k = 1..min(8, n) of makespan + 2000*k, by enumerating the
+    set partitions of `tests` (restricted-growth strings capped at 8 bins).
+    n is small enough here that the enumeration is cheap."""
+    n = len(tests)
+    caps = min(8, n)
+    d = [durations_ms.get(t, 0) for t in tests]
+    best_cost = 10**18
+    best_assign: list[int] = []
+    assign = [0] * n
+    loads = [0] * caps
+
+    def rec(i: int, used: int) -> None:
+        nonlocal best_cost, best_assign
+        if i == n:
+            cost = max(loads[:used]) + 2000 * used
+            if cost < best_cost:
+                best_cost = cost
+                best_assign = assign[:]
+            return
+        for a in range(used):
+            assign[i] = a
+            loads[a] += d[i]
+            rec(i + 1, used)
+            loads[a] -= d[i]
+        if used < caps:
+            assign[i] = used
+            loads[used] += d[i]
+            rec(i + 1, used + 1)
+            loads[used] -= d[i]
+
+    rec(0, 1)
+    used = max(best_assign) + 1 if best_assign else 0
+    workers = [[] for _ in range(used)]
+    for t, a in zip(tests, best_assign):
+        workers[a].append(t)
+    return workers
 
 
 def _lpt(loads: list[int], tests: list[int], k: int) -> tuple[list[list[int]], list[int]]:

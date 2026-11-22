@@ -26,7 +26,7 @@ def _patch(mod_path=REL):
 """.format(rel=mod_path)
 
 
-def _engine(maps_dir, *, extra=None):
+def _engine(maps_dir, *, extra=None, canary=True):
     data = {
         "id_order.json": ["a", "b", "c", "d", "e", "f"],
         "line_coverage.json": {},
@@ -44,7 +44,9 @@ def _engine(maps_dir, *, extra=None):
     m.load()
     id_by_node = {nid: i + 1 for i, nid in enumerate(m.id_order)}
     pristine = {REL: PRISTINE}
-    return RuleEngine(m, id_by_node, pristine)
+    eng = RuleEngine(m, id_by_node, pristine)
+    eng._canary = canary   # BR_CANARY=1 equivalent; default is off
+    return eng
 
 
 def test_canary_fires_when_line_map_empty(tmp_path):
@@ -77,3 +79,14 @@ def test_canary_does_not_fire_on_comment_only(tmp_path):
     sel = engine.select_for_files(P.parse_patch(patch))
     opt_exec = engine._opt_executor_numbers()
     assert sel & opt_exec == set(), sel
+
+
+def test_canary_off_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("BR_CANARY", raising=False)
+    engine = _engine(str(tmp_path), canary=None)
+    del engine._canary
+    m = engine.maps
+    fresh = RuleEngine(m, engine.id_by_node, engine.pristine)
+    assert fresh._canary is False
+    sel = fresh.select_for_files(P.parse_patch(_patch()))
+    assert sel == set(), sel

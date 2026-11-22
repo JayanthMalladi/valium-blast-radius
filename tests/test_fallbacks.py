@@ -145,3 +145,37 @@ def test_non_py_outside_tests_and_sqlglot_selects_nothing(tmp_path):
 """
     engine = _engine(tmp_path)
     assert engine.select_for_files(P.parse_patch(patch)) == set()
+
+
+def test_collection_sensitive_paths_use_full_suite(tmp_path):
+    engine = _engine(tmp_path)
+    for path in ("tests/helpers.py", "tests/dialects/conftest.py", "pyproject.toml", "sqlglotc/build.py"):
+        patch = f"""diff --git a/{path} b/{path}
+--- a/{path}
++++ b/{path}
+@@ -1 +1 @@
+-old
++new
+"""
+        assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
+
+
+def test_rename_handles_the_old_import_or_fixture_path(tmp_path):
+    engine = _engine(tmp_path)
+    for old in ("sqlglot/module.py", "tests/fixtures/data.sql", "tests/helpers.py"):
+        patch = f"""diff --git a/{old} b/moved.txt
+similarity index 100%
+rename from {old}
+rename to moved.txt
+"""
+        assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
+
+
+def test_unrelated_rename_does_not_force_full_suite(tmp_path):
+    engine = _engine(tmp_path)
+    patch = """diff --git a/docs/old.md b/docs/new.md
+similarity index 100%
+rename from docs/old.md
+rename to docs/new.md
+"""
+    assert engine.select_for_files(P.parse_patch(patch)) == set()

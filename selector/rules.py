@@ -3,8 +3,9 @@
 All lookups return node ids; the runtime layer maps them to test numbers.
 BR_DEBUG=1 writes `work/runs/<run>.reasons.jsonl`:
   one JSON line per commit: {"commit": cid, "reasons": [{"test": <number>, "line": "<module>:<pristine line>", "rule": "<why selected>"}]}
-BR_NO_CANARY=1 disables the coarse optimizer+executor canary (used to measure
-the precise line-map + dialect-family rules alone).
+BR_FAMILY=1 re-enables the dialect-family union (off by default).
+BR_CANARY=1 enables the coarse optimizer+executor canary (off by default since
+the v2 per-test maps credit the spawn-pool optimizer/executor tests directly).
 """
 from __future__ import annotations
 import ast
@@ -21,6 +22,8 @@ from .statement import statement_ranges
 DATA = os.environ.get("BR_DATA", "/data")
 RUN_NAME = os.environ.get("BR_DEBUG_RUN", "debug")
 _THIN_CANARY = 50   # fire canary when code-change selection is below this
+_SHARED_TEST_FILES = {"tests/__init__.py", "tests/helpers.py"}
+_BUILD_FILES = {"pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.ini", "conftest.py"}
 
 
 def _write_reasons(path: str, entries: list[dict]) -> None:
@@ -66,6 +69,22 @@ def _classify(pristine: str | None, patched: str | None) -> str:
     return "code_change"
 
 
+def _with_hunks(fp: P.FilePatch, hunks: list) -> P.FilePatch:
+    return P.FilePatch(path=fp.path, old_path=fp.old_path, is_new=fp.is_new,
+                       is_deleted=fp.is_deleted, is_binary=fp.is_binary,
+                       is_renamed=fp.is_renamed, hunks=list(hunks))
+
+
+def _hunk_is_comment_only(pristine: str, fp: P.FilePatch, hunk) -> bool:
+    """True when applying `hunk` alone to the pristine file parses and leaves
+    the docstring-stripped AST identical (only comments, blank lines or
+    docstrings changed)."""
+    if len(fp.hunks) == 1:
+        return False   # the whole-file check already decided this
+    one = apply_file_patch(pristine, _with_hunks(fp, [hunk]))
+    return one is not None and _classify(pristine, one) == "comment_only"
+
+
 class RuleEngine:
     def __init__(self, maps: Maps, id_by_node: dict[str, int],
                  pristine_files: dict[str, str]) -> None:
@@ -73,7 +92,12 @@ class RuleEngine:
         self.id_by_node = id_by_node
         self.pristine = pristine_files
         self._debug = os.environ.get("BR_DEBUG") == "1"
-        self._no_canary = os.environ.get("BR_NO_CANARY") == "1"
+        self._canary = os.environ.get("BR_CANARY") == "1"
+        # Dialect-family union: off by default. It was added to cover gaps in
+        # the v1 maps; the v2 per-test maps credit sibling files directly, and
+        # the union (which includes the changed file's own lines) undoes
+        # statement-level precision for every dialect-family file.
+        self._family = os.environ.get("BR_FAMILY") == "1"
         self._reasons: list[dict] = []
         self._opt_exec_ids: set[int] | None = None
 
@@ -141,11 +165,25 @@ class RuleEngine:
     # ------------------------------------------------------------------
     def _file(self, fp: P.FilePatch) -> set:
         rel = fp.path
+        paths = {rel, fp.old_path}
+        if any(path in _BUILD_FILES or path in _SHARED_TEST_FILES or
+               path.startswith("sqlglotc/") or path.endswith("/conftest.py") for path in paths):
+            # Shared setup and build changes can affect collection outside
+            # the edited file. Line coverage does not capture that dependency.
+            return self._full_suite_numbers()
+        if fp.is_renamed:
+            if any(path.startswith(("sqlglot/", "tests/")) for path in paths):
+                # Imports and fixture reads may still resolve the old path.
+                return self._full_suite_numbers()
         if fp.is_binary:
             # A source file replaced by a binary blob cannot be bounded by the
             # maps: any importer can break. Safe fallback: full suite.
             if rel.endswith(".py") and rel.startswith("sqlglot/"):
                 return self._full_suite_numbers()
+            if rel.startswith("tests/") and rel.endswith(".py"):
+                return self._testfile_numbers(rel)
+            if rel.startswith("tests/fixtures/"):
+                return self._fixture_numbers(rel) or self._testfile_numbers("tests/test_optimizer.py")
             return set()
         if fp.is_deleted:
             if rel.startswith("sqlglot/") and rel.endswith(".py"):
@@ -183,6 +221,8 @@ class RuleEngine:
         if cat == "import_break":
             return self._full_suite_numbers()
         if cat == "comment_only":
+            # Source readers and tests with unknown coverage retain their
+            # existing signal for textual edits.
             return self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
 
         # A patch whose hunks do not match the pristine file cannot be applied
@@ -193,9 +233,14 @@ class RuleEngine:
         if _safe_parse(patched) is None:
             return self._full_suite_numbers()
 
-        # CODE_CHANGE
-        changed = changed_pristine_lines(fp)
+        # CODE_CHANGE. Hunks that are comment/docstring-only on their own
+        # (applying just that hunk leaves the AST unchanged) contribute no
+        # changed statement; they only reach the source readers.
+        code_hunks = [h for h in fp.hunks if not _hunk_is_comment_only(pristine, fp, h)]
         out: set = set()
+        if len(code_hunks) < len(fp.hunks):
+            out |= self._reader_numbers(rel)
+        changed = changed_pristine_lines(_with_hunks(fp, code_hunks))
         if self.maps.has_line_coverage:
             try:
                 tree = ast.parse(pristine)
@@ -217,7 +262,7 @@ class RuleEngine:
         # (generators/parsers/typing/<stem>.py) share the dialect's behavior.
         # Every test that executed any sibling line at the pinned commit is
         # potentially affected.
-        fam = self._family_numbers(rel)
+        fam = self._family_numbers(rel) if self._family else set()
         if fam:
             out |= fam
             if self._debug:
@@ -230,7 +275,7 @@ class RuleEngine:
 
         # Coarse canary: when the precise selection is thin, add the
         # optimizer+executor suites. Safe-mode fallback enabler.
-        if not self._no_canary and len(out) < _THIN_CANARY:
+        if self._canary and len(out) < _THIN_CANARY:
             out |= self._opt_executor_numbers()
 
         return out | self._unknown_loader_numbers(rel)
