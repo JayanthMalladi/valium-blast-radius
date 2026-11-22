@@ -114,7 +114,7 @@ def test_context_polarity_chains_and_partial_profiles_retain():
     assert comparison_swap("a is None; b is None", "a == None; b == None") is None
 
 
-def test_preserves_reader_unknown_and_heap_observers(tmp_path):
+def test_preserves_reader_and_unknown_observers(tmp_path):
     rel = "sqlglot/example.py"
     source = "def f(x):\n    return x is None\n"
     (tmp_path / "operand_profiles.json").write_text(json.dumps(profile(source)))
@@ -133,7 +133,9 @@ def test_preserves_reader_unknown_and_heap_observers(tmp_path):
     diff = "".join(difflib.unified_diff(source.splitlines(True), patched.splitlines(True),
                                        fromfile=f"a/{rel}", tofile=f"b/{rel}"))
     patch = parse_patch(f"diff --git a/{rel} b/{rel}\n" + diff)
-    assert engine.select_for_files(patch) == {2, 3, 4}
+    # Every observed evaluation agreed and the edit is inside a function
+    # body, so the executed code is unchanged: the heap observer is dropped.
+    assert engine.select_for_files(patch) == {2, 3}
     other = parse_patch("diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n")
     assert 1 in engine.select_for_files(patch + other)
 
