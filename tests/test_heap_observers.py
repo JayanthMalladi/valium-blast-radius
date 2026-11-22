@@ -25,7 +25,7 @@ class TestHeap:
 
 
 def test_semantic_change_keeps_heap_observer_without_line_coverage(tmp_path):
-    rel = "sqlglot/helper.py"
+    rel = "sqlglot/dialects/dialect.py"
     source = "def helper():\n    return 1\n"
     tests = "import tracemalloc\ndef test_heap():\n    return tracemalloc.get_traced_memory()\n"
     maps = Maps(str(tmp_path))
@@ -52,3 +52,24 @@ def test_heap():
 """
     assert _heap_observers({"tests/test_heap.py": source},
                            {"tests/test_heap.py::test_heap": 5}) == {5}
+
+
+def _heap_engine(tmp_path, rel):
+    source = "def helper():\n    return 1\n"
+    tests = "import tracemalloc\ndef test_heap():\n    return tracemalloc.get_traced_memory()\n"
+    maps = Maps(str(tmp_path))
+    maps.load()
+    engine = RuleEngine(maps, {"tests/test_heap.py::test_heap": 77},
+                        {rel: source, "tests/test_heap.py": tests})
+    diff = "".join(difflib.unified_diff(source.splitlines(True),
+                                        source.replace("return 1", "return 2").splitlines(True),
+                                        fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+    return engine.select_for_files(parse_patch(f"diff --git a/{rel} b/{rel}\n" + diff))
+
+
+def test_heap_observer_kept_for_dialect_construction_code(tmp_path):
+    assert _heap_engine(tmp_path, "sqlglot/dialects/dialect.py") == {77}
+
+
+def test_heap_observer_dropped_outside_dialect_construction_code(tmp_path):
+    assert _heap_engine(tmp_path, "sqlglot/optimizer/simplify.py") == set()

@@ -24,6 +24,9 @@ DATA = os.environ.get("BR_DATA", "/data")
 RUN_NAME = os.environ.get("BR_DEBUG_RUN", "debug")
 _THIN_CANARY = 50   # fire canary when code-change selection is below this
 _SHARED_TEST_FILES = {"tests/__init__.py", "tests/helpers.py"}
+_HEAP_REACH = ("sqlglot/dialects/", "sqlglot/generators/", "sqlglot/parsers/",
+               "sqlglot/tokenizers/", "sqlglot/generator.py", "sqlglot/parser.py",
+               "sqlglot/tokens.py", "sqlglot/time.py")
 _BUILD_FILES = {"pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.ini", "conftest.py"}
 
 
@@ -348,6 +351,20 @@ class RuleEngine:
         return self._sqlglot(fp, rel)
 
     def _sqlglot(self, fp: P.FilePatch, rel: str) -> set:
+        # The heap observers (test_generator_memory) are kept for edits that can
+        # reach dialect construction or the generator: every labelled change that
+        # broke it, including one that broke it only in a grouped run, was in this
+        # code. Elsewhere they are kept only when coverage selects them.
+        if os.environ.get("BR_GM_GUARD", "1") == "1" and not rel.startswith(_HEAP_REACH):
+            saved = self._heap_observer_ids
+            self._heap_observer_ids = set()
+            try:
+                return self._sqlglot_inner(fp, rel)
+            finally:
+                self._heap_observer_ids = saved
+        return self._sqlglot_inner(fp, rel)
+
+    def _sqlglot_inner(self, fp: P.FilePatch, rel: str) -> set:
         if fp.is_new:
             return self._new_source(fp, rel)
 
