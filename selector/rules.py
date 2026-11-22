@@ -85,6 +85,52 @@ def _hunk_is_comment_only(pristine: str, fp: P.FilePatch, hunk) -> bool:
     return one is not None and _classify(pristine, one) == "comment_only"
 
 
+def _heap_observers(pristine: dict[str, str], id_by_node: dict[str, int]) -> set[int]:
+    """Find tests directly observing the process-wide Python allocation heap.
+
+    Coverage bounds executed instructions, not retained objects/finalizers from
+    other tests in the same worker. A semantic source change can alter that
+    heap even when an observing test never executes the changed instruction.
+    Derive observers from pinned source, without names or runtime test numbers.
+    """
+    observers = set()
+    probes = {"get_traced_memory", "get_tracemalloc_memory", "take_snapshot"}
+    for rel, source in pristine.items():
+        if not rel.startswith("tests/") or "tracemalloc" not in source:
+            continue
+        tree = _safe_parse(source)
+        if tree is None:
+            continue
+        modules = set()
+        functions = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules.update(a.asname or a.name for a in node.names if a.name == "tracemalloc")
+            elif isinstance(node, ast.ImportFrom) and node.module == "tracemalloc":
+                functions.update(a.asname or a.name for a in node.names if a.name in probes)
+
+        def visit(node, names):
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                names = [*names, node.name]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for call in ast.walk(node):
+                    if not isinstance(call, ast.Call):
+                        continue
+                    target = call.func
+                    if ((isinstance(target, ast.Name) and target.id in functions)
+                            or (isinstance(target, ast.Attribute) and target.attr in probes
+                                and isinstance(target.value, ast.Name)
+                                and target.value.id in modules)):
+                        number = id_by_node.get("::".join([rel, *names]))
+                        if number is not None:
+                            observers.add(number)
+            for child in ast.iter_child_nodes(node):
+                visit(child, names)
+
+        visit(tree, [])
+    return observers
+
+
 class RuleEngine:
     def __init__(self, maps: Maps, id_by_node: dict[str, int],
                  pristine_files: dict[str, str]) -> None:
@@ -100,6 +146,7 @@ class RuleEngine:
         self._family = os.environ.get("BR_FAMILY") == "1"
         self._reasons: list[dict] = []
         self._opt_exec_ids: set[int] | None = None
+        self._heap_observer_ids = _heap_observers(pristine_files, id_by_node)
 
     # ------------------------------------------------------------------
     def _ids(self, node_ids: list) -> set:
@@ -278,7 +325,7 @@ class RuleEngine:
         if self._canary and len(out) < _THIN_CANARY:
             out |= self._opt_executor_numbers()
 
-        return out | self._unknown_loader_numbers(rel)
+        return out | self._unknown_loader_numbers(rel) | self._heap_observer_ids
 
     def _new_source(self, fp: P.FilePatch, rel: str) -> set:
         text = apply_file_patch(None, fp) or ""
@@ -286,5 +333,5 @@ class RuleEngine:
             # Unparseable new .py under sqlglot/: the import chain can break.
             return self._full_suite_numbers()
         if rel.startswith("sqlglot/dialects/"):
-            return self._testfile_numbers("tests/test_dialect.py")
-        return set()
+            return self._testfile_numbers("tests/test_dialect.py") | self._heap_observer_ids
+        return set(self._heap_observer_ids)
