@@ -26,6 +26,7 @@ def _maps_dir(tmp_path: Path, line_coverage: dict | None = None) -> Path:
         "test_files.json": {
             "tests/test_optimizer.py": ["c", "d"],
             "tests/test_executor.py": ["e"],
+            "tests/test_parser.py": ["g", "h"],
         },
         "fixture_map.json": {},
         "line_coverage.json": line_coverage or {},
@@ -135,7 +136,7 @@ def test_comment_only_uses_readers_not_full_suite(tmp_path):
     assert sel == {3}                   # source reader only
 
 
-def test_non_py_outside_tests_and_sqlglot_selects_nothing(tmp_path):
+def test_non_py_outside_tests_and_sqlglot_selects_full_suite(tmp_path):
     patch = """diff --git a/docs/notes.md b/docs/notes.md
 --- a/docs/notes.md
 +++ b/docs/notes.md
@@ -144,7 +145,39 @@ def test_non_py_outside_tests_and_sqlglot_selects_nothing(tmp_path):
 +world
 """
     engine = _engine(tmp_path)
-    assert engine.select_for_files(P.parse_patch(patch)) == set()
+    assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
+
+
+def test_fixture_edit_selects_full_suite(tmp_path):
+    # Non-Python paths (fixtures, .sql/.json, docs, build config) are not
+    # bounded by source-line coverage, so they select the full suite.
+    engine = _engine(tmp_path)
+    for path in ("tests/fixtures/optimizer/foo.sql", "tests/fixtures/data.json",
+                 "tests/dialects/fixtures/x.sql", "docs/notes.md", "pyproject.toml"):
+        patch = f"""diff --git a/{path} b/{path}
+--- a/{path}
++++ b/{path}
+@@ -1 +1 @@
+-old
++new
+"""
+        sel = engine.select_for_files(P.parse_patch(patch))
+        assert sel == _full(engine), (path, sel)
+
+
+def test_test_py_edit_does_not_select_full_suite(tmp_path):
+    # tests/**/*.py keeps its per-file handling: only its mapped tests.
+    patch = """diff --git a/tests/test_parser.py b/tests/test_parser.py
+--- a/tests/test_parser.py
++++ b/tests/test_parser.py
+@@ -1 +1 @@
+-old
++new
+"""
+    engine = _engine(tmp_path)
+    sel = engine.select_for_files(P.parse_patch(patch))
+    assert sel == {7, 8}, sel
+    assert sel != _full(engine)
 
 
 def test_collection_sensitive_paths_use_full_suite(tmp_path):
@@ -171,11 +204,11 @@ rename to moved.txt
         assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
 
 
-def test_unrelated_rename_does_not_force_full_suite(tmp_path):
+def test_unrelated_rename_selects_full_suite(tmp_path):
     engine = _engine(tmp_path)
     patch = """diff --git a/docs/old.md b/docs/new.md
 similarity index 100%
 rename from docs/old.md
 rename to docs/new.md
 """
-    assert engine.select_for_files(P.parse_patch(patch)) == set()
+    assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)

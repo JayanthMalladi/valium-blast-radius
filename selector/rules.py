@@ -189,6 +189,14 @@ class RuleEngine:
 
     # ------------------------------------------------------------------
     def select_for_files(self, files: list) -> set:
+        # Diagnostic safety net: dependencies of non-Python files (fixtures,
+        # .sql/.json resources, docs, build config) are not bounded by
+        # source-line coverage, including mixed commits. tests/**/*.py keeps
+        # its existing per-file handling.
+        if any(not (path.startswith("sqlglot/") and path.endswith(".py"))
+               and not (path.startswith("tests/") and path.endswith(".py"))
+               for fp in files for path in (fp.old_path, fp.path)):
+            return self._full_suite_numbers()
         # The first evaluation argument requires an isolated semantic edit:
         # another file could change which operand values reach this site.
         self._operand_isolated_file = len(files) == 1
