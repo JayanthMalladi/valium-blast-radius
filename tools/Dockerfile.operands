@@ -1,0 +1,9 @@
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+RUN python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/tobymao/sqlglot/archive/eb11aec4be8cb2122afe713a4816662c3f0fb2fa.tar.gz', '/tmp/source.tar.gz')" \
+ && tar -xzf /tmp/source.tar.gz -C /opt \
+ && mv /opt/sqlglot-eb11aec4be8cb2122afe713a4816662c3f0fb2fa /opt/sqlglot
+COPY tools/operand-requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY tools/operand_profile.py /profiletools/operand_profile.py
+ENV PYTHONDONTWRITEBYTECODE=1
+CMD ["python", "/profiletools/operand_profile.py", "/opt/sqlglot", "/profileout"]

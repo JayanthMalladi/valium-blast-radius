@@ -17,6 +17,7 @@ from .hunkapply import apply_file_patch, patch_applies
 from .maps import Maps
 from .pristine_lines import changed_pristine_lines
 from .statement import statement_ranges
+from .operands import profiled_noop
 
 
 DATA = os.environ.get("BR_DATA", "/data")
@@ -188,6 +189,9 @@ class RuleEngine:
 
     # ------------------------------------------------------------------
     def select_for_files(self, files: list) -> set:
+        # The first evaluation argument requires an isolated semantic edit:
+        # another file could change which operand values reach this site.
+        self._operand_isolated_file = len(files) == 1
         sel: set = set()
         for fp in files:
             sel |= self._file(fp)
@@ -279,6 +283,17 @@ class RuleEngine:
         # Patched text that is not valid Python breaks the import chain.
         if _safe_parse(patched) is None:
             return self._full_suite_numbers()
+
+        # All operand pairs observed in the complete pristine suite must have
+        # agreed under identity/equality, with comparison methods established
+        # as safe at profile time. Unknown, custom-rich-comparison and partial
+        # profiles retain ordinary selection. Text/loader and process-wide heap
+        # observers still see the source or allocation change.
+        if (getattr(self, "_operand_isolated_file", False)
+                and os.environ.get("BR_OPERANDS", "1") == "1"
+                and profiled_noop(self.maps.operand_profiles, rel, pristine, patched)):
+            return (self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
+                    | self._heap_observer_ids)
 
         # CODE_CHANGE. Hunks that are comment/docstring-only on their own
         # (applying just that hunk leaves the AST unchanged) contribute no

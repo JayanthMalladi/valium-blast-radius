@@ -28,6 +28,7 @@ class Maps:
         self.source_readers: dict = {}
         self.test_files: dict = {}
         self.unknown_loaders: dict = {}
+        self.operand_profiles: dict = {}
         self.has_line_coverage: bool = False   # set in load()
         self.id_order: list = []
         self._family_index: dict = {}         # stem -> [rel paths with coverage]
@@ -72,6 +73,7 @@ class Maps:
         # [nodeid,...] of tests that load files/modules not covered by the
         # other maps. Absent or empty file is a no-op.
         self.unknown_loaders = rd("unknown_loaders.json", {})
+        self.operand_profiles = rd("operand_profiles.json", {})
         self.has_line_coverage = bool(self._line_raw)
         # Dialect-family index: which family directories hold which stems.
         for path in self._line_raw:
