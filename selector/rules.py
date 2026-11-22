@@ -188,6 +188,11 @@ class RuleEngine:
 
     # ------------------------------------------------------------------
     def select_for_files(self, files: list) -> set:
+        # Diagnostic safety net: dependencies outside Python package source
+        # are not bounded by source-line coverage, including mixed commits.
+        if any(not (path.startswith("sqlglot/") and path.endswith(".py"))
+               for fp in files for path in (fp.old_path, fp.path)):
+            return self._full_suite_numbers()
         sel: set = set()
         for fp in files:
             sel |= self._file(fp)

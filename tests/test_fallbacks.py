@@ -135,7 +135,7 @@ def test_comment_only_uses_readers_not_full_suite(tmp_path):
     assert sel == {3}                   # source reader only
 
 
-def test_non_py_outside_tests_and_sqlglot_selects_nothing(tmp_path):
+def test_non_py_outside_tests_and_sqlglot_selects_full_suite(tmp_path):
     patch = """diff --git a/docs/notes.md b/docs/notes.md
 --- a/docs/notes.md
 +++ b/docs/notes.md
@@ -144,7 +144,7 @@ def test_non_py_outside_tests_and_sqlglot_selects_nothing(tmp_path):
 +world
 """
     engine = _engine(tmp_path)
-    assert engine.select_for_files(P.parse_patch(patch)) == set()
+    assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
 
 
 def test_collection_sensitive_paths_use_full_suite(tmp_path):
@@ -171,11 +171,36 @@ rename to moved.txt
         assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
 
 
-def test_unrelated_rename_does_not_force_full_suite(tmp_path):
+def test_unrelated_rename_selects_full_suite(tmp_path):
     engine = _engine(tmp_path)
     patch = """diff --git a/docs/old.md b/docs/new.md
 similarity index 100%
 rename from docs/old.md
 rename to docs/new.md
 """
-    assert engine.select_for_files(P.parse_patch(patch)) == set()
+    assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
+
+
+def test_every_non_source_path_and_mixed_commit_select_full_suite(tmp_path):
+    engine = _engine(tmp_path)
+    source = P.FilePatch(REL, REL, False, False, False, False)
+    for path in ("tests/test_case.py", "tests/fixtures/data.sql", "setup.py",
+                 "sqlglotc/code.c", "docs/readme.md", "README.md", "sqlglot/data.json"):
+        edit = P.FilePatch(path, path, False, False, False, False)
+        assert engine.select_for_files([edit]) == _full(engine)
+        assert engine.select_for_files([source, edit]) == _full(engine)
+        # Check both sides of a rename crossing the package boundary.
+        assert engine.select_for_files([P.FilePatch(REL, path, False, False, False, True)]) == _full(engine)
+        assert engine.select_for_files([P.FilePatch(path, REL, False, False, False, True)]) == _full(engine)
+
+
+def test_source_only_commit_keeps_original_precise_selection(tmp_path):
+    engine = _engine(tmp_path, {REL: {"2": "1"}})
+    patch = f"""diff --git a/{REL} b/{REL}
+--- a/{REL}
++++ b/{REL}
+@@ -2 +2 @@
+-y = 2
++y = 3
+"""
+    assert engine.select_for_files(P.parse_patch(patch)) == {1}
