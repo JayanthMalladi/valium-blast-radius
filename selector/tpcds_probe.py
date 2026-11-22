@@ -33,7 +33,8 @@ def _queries(root: str):
         code = f.read()
     ns["__file__"] = helpers
     exec(compile(code, helpers, "exec"), ns)
-    return ns["TPCDS_SCHEMA"], list(ns["load_sql_fixture_pairs"]("optimizer/tpc-ds/tpc-ds.sql"))
+    return (ns["TPCDS_SCHEMA"], list(ns["load_sql_fixture_pairs"]("optimizer/tpc-ds/tpc-ds.sql")),
+            list(ns["load_sql_fixture_pairs"]("optimizer/tpc-h/tpc-h.sql")))
 
 
 class Differs(Exception):
@@ -50,7 +51,7 @@ def digest(root: str, expected: dict | None = None) -> dict:
     from sqlglot.planner import Plan
     from sqlglot.schema import ensure_schema
 
-    schema_dict, pairs = _queries(root)
+    schema_dict, pairs, tpch_pairs = _queries(root)
     schema = ensure_schema(schema_dict)
     out: dict = {"schema": _sha(repr(schema.mapping))}
     if expected is not None and expected.get("schema") != out["schema"]:
@@ -111,6 +112,15 @@ def digest(root: str, expected: dict | None = None) -> dict:
                 raise Differs(str(i))
     finally:
         py.PythonExecutor.generate = orig_generate
+    # test_execute_tpch: every TPC-H query is parsed and pickled to a worker;
+    # none carries execute meta, so nothing runs on data.
+    import pickle
+    for i, (meta, sql, _) in enumerate(tpch_pairs):
+        try:
+            part = repr(meta) + "\n\x00" + repr(pickle.loads(pickle.dumps(parse_one(sql))))
+        except Exception as exc:
+            part = "error:" + type(exc).__name__
+        out["h:" + str(i)] = _sha(part)
     return out
 
 

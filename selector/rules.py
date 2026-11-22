@@ -180,6 +180,7 @@ def _subprocess_tests(pristine: dict[str, str]) -> set[str]:
 # Wall seconds of probing per run, well inside the batch time limit.
 _TPCDS_BUDGET = float(os.environ.get("BR_TPCDS_BUDGET", "60"))
 _TPCDS_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+_TPCH_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpch"
 # Code the executor runs on the data itself, or whose effect the staged
 # digest does not fully capture (plan step options, the Python generator).
 _TPCDS_RUNTIME = ("sqlglot/executor/", "sqlglot/helper.py", "sqlglot/expressions/",
@@ -515,9 +516,13 @@ class RuleEngine:
                 and self._maxnodes_ok(files)):
             sel.discard(mx)
         tpcds = self.id_by_node.get(_TPCDS_TEST)
-        if (tpcds in sel and os.environ.get("BR_TPCDS_PROBE", "1") == "1"
-                and self._tpcds_unchanged(files)):
-            sel.discard(tpcds)
+        tpch = self.id_by_node.get(_TPCH_TEST)
+        self._last_tpch_same = False
+        if ((tpcds in sel or tpch in sel) and os.environ.get("BR_TPCDS_PROBE", "1") == "1"):
+            if self._tpcds_unchanged(files):
+                sel.discard(tpcds)
+            if self._last_tpch_same:
+                sel.discard(tpch)
         return sel
 
     def _maxnodes_ok(self, files: list) -> bool:
@@ -632,7 +637,11 @@ class RuleEngine:
             if r.returncode != 0:
                 return False
             with open(out, encoding="utf-8") as f:
-                return json.load(f) == self._tpcds_digest
+                got = json.load(f)
+            want = self._tpcds_digest
+            split = lambda d, h: {k: v for k, v in d.items() if k.startswith("h:") == h}
+            self._last_tpch_same = bool(split(want, True)) and split(got, True) == split(want, True)
+            return split(got, False) == split(want, False)
         except Exception:
             return False
         finally:
