@@ -14,6 +14,11 @@ RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://githu
 
 COPY selector /opt/selector
 COPY maps /opt/maps
+# Pristine digest for the TPC-DS executor probe (selector/tpcds_probe.py),
+# computed with this image's Python from the pinned tree.
+RUN cd /opt/sqlglot && PYTHONPATH=/opt PYTHONDONTWRITEBYTECODE=1 \
+    python -m selector.tpcds_probe /opt/sqlglot /opt/maps/tpcds_digest.json \
+ && test -s /opt/maps/tpcds_digest.json && chmod 644 /opt/maps/tpcds_digest.json
 
 ENV BR_MAPS=/opt/maps BR_PRISTINE=/opt/sqlglot BR_DATA=/data BR_NO_CANARY=1
 WORKDIR /opt

@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import sys
 
 from . import patch as P
 from .hunkapply import apply_file_patch, patch_applies
@@ -113,6 +114,54 @@ def _load_validated(maps_dir: str):
     with open(p, encoding="utf-8") as f:
         data = json.load(f)
     return data["by_class"], set(data["outside"])
+
+
+def _subprocess_tests(pristine: dict[str, str]) -> set[str]:
+    """Node ids of test functions that start another Python process.
+
+    The runtime maps are recorded in-process (and in multiprocessing
+    workers), so what such a test's child process does is not in them.
+    """
+    out: set[str] = set()
+    for rel, src in pristine.items():
+        if not rel.startswith("tests/") or not rel.endswith(".py"):
+            continue
+        if not any(k in src for k in ("subprocess", "os.system", "Popen", "os.exec")):
+            continue
+        tree = _safe_parse(src)
+        if tree is None:
+            continue
+        for node in tree.body:
+            funcs = [(None, node)] if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else []
+            if isinstance(node, ast.ClassDef):
+                funcs += [(node.name, f) for f in node.body
+                          if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            for cname, f in funcs:
+                body = ast.get_source_segment(src, f) or ""
+                if f.name.startswith("test") and any(
+                        k in body for k in ("subprocess", "os.system", "Popen", "os.exec")):
+                    out.add(rel + "::" + (cname + "::" if cname else "") + f.name)
+    return out
+
+
+# Wall seconds of probing per run, well inside the batch time limit.
+_TPCDS_BUDGET = float(os.environ.get("BR_TPCDS_BUDGET", "60"))
+_TPCDS_TEST = "tests/test_executor.py::TestExecutor::test_execute_tpcds"
+# Code the executor runs on the data itself, or whose effect the staged
+# digest does not fully capture (plan step options, the Python generator).
+_TPCDS_RUNTIME = ("sqlglot/executor/", "sqlglot/helper.py", "sqlglot/expressions/",
+                  "sqlglot/optimizer/scope.py", "sqlglot/schema.py",
+                  "sqlglot/generators/python.py", "sqlglot/planner.py")
+# Read by executor code at run time only through class attributes; body-only
+# edits there reach the test only through the digested stages.
+_TPCDS_BODY_ONLY = ("sqlglot/generator.py", "sqlglot/dialects/dialect.py", "sqlglot/tokens.py")
+
+
+def _load_json(path: str):
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
 def _load_instances(maps_dir: str):
@@ -317,6 +366,10 @@ class RuleEngine:
         self._validated, self._validated_outside_tests = _load_validated(maps.dir)
         self._instances, self._instances_outside = _load_instances(maps.dir)
         self._narrower = Narrower(pristine_files, maps.dir)
+        self._pristine_root = os.environ.get("BR_PRISTINE", "/opt/sqlglot")
+        self._opaque_tests = self._ids(sorted(_subprocess_tests(pristine_files)))
+        self._tpcds_digest = _load_json(os.path.join(maps.dir, "tpcds_digest.json"))
+        self._tpcds_spent = 0.0
 
     # ------------------------------------------------------------------
     def _ids(self, node_ids: list) -> set:
@@ -371,7 +424,7 @@ class RuleEngine:
         if not qualname or self._instances is None or qualname in self._instances_outside:
             return None
         ids = self._instances.get(qualname)
-        return None if ids is None else self._ids(ids)
+        return None if ids is None else self._ids(ids) | self._opaque_tests
 
     def _reader_numbers(self, rel: str) -> set:
         return self._ids(self.maps.reader_ids(rel))
@@ -387,7 +440,68 @@ class RuleEngine:
         sel: set = set()
         for fp in files:
             sel |= self._file(fp)
+        tpcds = self.id_by_node.get(_TPCDS_TEST)
+        if (tpcds in sel and os.environ.get("BR_TPCDS_PROBE", "1") == "1"
+                and self._tpcds_unchanged(files)):
+            sel.discard(tpcds)
         return sel
+
+    def _tpcds_unchanged(self, files: list) -> bool:
+        """The staged TPC-DS digest of the patched tree equals the pristine one.
+
+        Only for edits outside the code the executor runs on the data itself
+        (selector/tpcds_probe.py); any doubt or failure keeps the test.
+        """
+        if self._tpcds_digest is None or self._tpcds_spent > _TPCDS_BUDGET:
+            return False
+        patched: dict = {}
+        for fp in files:
+            rel = fp.path
+            if (fp.is_new or fp.is_deleted or fp.is_binary or fp.is_renamed
+                    or not rel.startswith("sqlglot/") or not rel.endswith(".py")
+                    or rel.startswith(_TPCDS_RUNTIME)):
+                return False
+            pristine = self.pristine.get(rel)
+            if not pristine or not patch_applies(pristine, fp):
+                return False
+            text = apply_file_patch(pristine, fp)
+            if text is None or _safe_parse(text) is None:
+                return False
+            if rel in _TPCDS_BODY_ONLY:
+                tree = _safe_parse(pristine)
+                if tree is None or not _body_only(tree, changed_pristine_lines(fp)):
+                    return False
+            patched[rel] = text
+        import shutil
+        import subprocess
+        import tempfile
+        import time
+        work = tempfile.mkdtemp(prefix="tpcds_")
+        start = time.monotonic()
+        try:
+            shutil.copytree(os.path.join(self._pristine_root, "sqlglot"),
+                            os.path.join(work, "sqlglot"),
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            os.symlink(os.path.join(self._pristine_root, "tests"), os.path.join(work, "tests"))
+            for rel, text in patched.items():
+                with open(os.path.join(work, rel), "w", encoding="utf-8") as f:
+                    f.write(text)
+            out = os.path.join(work, "digest.json")
+            here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            env = dict(os.environ, PYTHONPATH=work + os.pathsep + here,
+                       PYTHONDONTWRITEBYTECODE="1")
+            r = subprocess.run([sys.executable, "-m", "selector.tpcds_probe", work, out],
+                               cwd=work, env=env, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=90)
+            if r.returncode != 0:
+                return False
+            with open(out, encoding="utf-8") as f:
+                return json.load(f) == self._tpcds_digest
+        except Exception:
+            return False
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+            self._tpcds_spent += time.monotonic() - start
 
     def record_reasons(self, commit: str, selected: set[int]) -> None:
         if not self._debug or not selected:
@@ -498,7 +612,7 @@ class RuleEngine:
             name = flipped_class(pristine, patched)
             owners = affected_owners(self.pristine, name) if name else None
             if owners and not owners & self._validated_outside_tests:
-                hit: set = set()
+                hit: set = set(self._opaque_tests)
                 for owner in owners:
                     hit |= self._ids(self._validated.get(owner, []))
                 return hit | self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
@@ -511,7 +625,7 @@ class RuleEngine:
             narrowed = self._narrower.narrow(rel, pristine, patched)
             if narrowed is not None:
                 _, lines, (test_ids, test_files), qualname = narrowed
-                hit = self._ids(sorted(test_ids))
+                hit = self._ids(sorted(test_ids)) | self._opaque_tests
                 made = self._instance_tests(qualname)
                 for src_rel, ln, instance_read in lines:
                     covered = self._line_numbers(src_rel, ln)

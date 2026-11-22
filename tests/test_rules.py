@@ -143,3 +143,28 @@ def test_constant_read_through_self_is_bounded_by_instance_map(tmp_path):
     inst["outside"] = ["sqlglot.generators.demo.DemoGen"]
     (tmp_path / "instance_classes.json").write_text(json.dumps(inst))
     assert select() == {0, 1}
+
+
+def test_subprocess_tests_are_found():
+    from selector.rules import _subprocess_tests
+    src = ("import subprocess\nclass T:\n    def test_a(self):\n        subprocess.run(['python'])\n"
+           "    def test_b(self):\n        return 1\n")
+    assert _subprocess_tests({"tests/test_x.py": src}) == {"tests/test_x.py::T::test_a"}
+
+
+def test_tpcds_probe_skipped_without_digest_or_for_executor_code(tmp_path):
+    import json
+    from selector.maps import Maps
+    from selector.patch import parse_patch
+    from selector.rules import RuleEngine
+    ids = ["tests/test_executor.py::TestExecutor::test_execute_tpcds"]
+    (tmp_path / "id_order.json").write_text(json.dumps(ids))
+    maps = Maps(str(tmp_path))
+    maps.load()
+    rel = "sqlglot/executor/python.py"
+    engine = RuleEngine(maps, {ids[0]: 0}, {rel: "def f():\n    return 1\n"})
+    patch = parse_patch(f"diff --git a/{rel} b/{rel}\n--- a/{rel}\n+++ b/{rel}\n"
+                        "@@ -1,2 +1,2 @@\n def f():\n-    return 1\n+    return 2\n")
+    assert engine._tpcds_unchanged(patch) is False  # no digest
+    engine._tpcds_digest = {"x": "y"}
+    assert engine._tpcds_unchanged(patch) is False  # executor code is never probed
