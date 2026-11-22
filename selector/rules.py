@@ -77,6 +77,8 @@ def _classify(pristine: str | None, patched: str | None) -> str:
 
 
 _GM_NARROW = int(os.environ.get("BR_GM_K", "50"))
+_GM_NARROW_CLASS = int(os.environ.get("BR_GM_CLASS_K", "100"))
+_MAX_NODES_TEST = "tests/test_parser.py::TestParser::test_max_nodes"
 
 
 def _called_lambdas(tree) -> set:
@@ -527,6 +529,11 @@ class RuleEngine:
                path.startswith("sqlglotc/") or path.endswith("/conftest.py") for path in paths):
             # Shared setup and build changes can affect collection outside
             # the edited file. Line coverage does not capture that dependency.
+            if (os.environ.get("BR_RISKY", "1") == "1"
+                    and all(path is None or path in ("pyproject.toml", "setup.py", "setup.cfg") for path in paths)):
+                # Build metadata does not reach the parser's node budget: the
+                # 28.8 s test_max_nodes is left out of this fallback.
+                return self._full_suite_numbers() - {self.id_by_node.get(_MAX_NODES_TEST)}
             return self._full_suite_numbers()
         if fp.is_renamed:
             if any(path.startswith(("sqlglot/", "tests/")) for path in paths):
@@ -715,6 +722,11 @@ class RuleEngine:
             # execute is not on that path. The labelled function-body edits
             # that broke the observers ran in 54 (time.format_time, which also
             # runs while dialects are built) and 1,533 tests.
+            heap = set()
+        elif (heap and tree and rel != "sqlglot/time.py" and os.environ.get("BR_RISKY", "1") == "1"
+                and len(out - heap) < _GM_NARROW_CLASS):
+            # Class-level edits that few tests execute: the labelled class-body
+            # edits that broke the heap observers were run by 235+ tests.
             heap = set()
         return out | self._unknown_loader_numbers(rel) | heap
 

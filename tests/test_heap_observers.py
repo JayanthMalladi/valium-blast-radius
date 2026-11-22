@@ -95,12 +95,34 @@ def test_narrow_function_body_edit_drops_heap_observer(tmp_path):
     assert _covered_engine(tmp_path, "sqlglot/dialects/dialect.py", source, patched, [1, 2, 3]) == {0}
 
 
+def _without_risky(fn):
+    import os
+    saved = os.environ.get("BR_RISKY")
+    os.environ["BR_RISKY"] = "0"
+    try:
+        return fn()
+    finally:
+        if saved is None:
+            del os.environ["BR_RISKY"]
+        else:
+            os.environ["BR_RISKY"] = saved
+
+
 def test_class_level_edit_and_time_module_keep_heap_observer(tmp_path):
     source = "X = 1\ndef helper():\n    return 1\n"
-    assert _covered_engine(tmp_path, "sqlglot/dialects/dialect.py", source,
-                           source.replace("X = 1", "X = 2"), [1, 2, 3]) == {0, 1}
+    assert _without_risky(lambda: _covered_engine(
+        tmp_path, "sqlglot/dialects/dialect.py", source,
+        source.replace("X = 1", "X = 2"), [1, 2, 3])) == {0, 1}
     assert _covered_engine(tmp_path, "sqlglot/time.py", source,
                            source.replace("return 1", "return 2"), [1, 2, 3]) == {0, 1}
+    assert _covered_engine(tmp_path, "sqlglot/time.py", source,
+                           source.replace("X = 1", "X = 2"), [1, 2, 3]) == {0, 1}
+
+
+def test_narrow_class_level_edit_drops_heap_observer(tmp_path):
+    source = "X = 1\ndef helper():\n    return 1\n"
+    assert _covered_engine(tmp_path, "sqlglot/dialects/dialect.py", source,
+                           source.replace("X = 1", "X = 2"), [1, 2, 3]) == {0}
 
 
 def test_lambda_interior_edit_drops_heap_observer(tmp_path):
@@ -109,7 +131,8 @@ def test_lambda_interior_edit_drops_heap_observer(tmp_path):
     assert _covered_engine(tmp_path, "sqlglot/dialects/dialect.py", source, patched, [1, 2, 3, 4, 5]) == {0}
     # The lambda's first line also holds the dict key, which runs at import.
     header = source.replace("'a': lambda", "'b': lambda")
-    assert _covered_engine(tmp_path, "sqlglot/dialects/dialect.py", source, header, [1, 2, 3, 4, 5]) == {0, 1}
+    assert _without_risky(lambda: _covered_engine(
+        tmp_path, "sqlglot/dialects/dialect.py", source, header, [1, 2, 3, 4, 5])) == {0, 1}
 
 
 def test_lambda_interior_uses_only_lambda_line_coverage(tmp_path):
