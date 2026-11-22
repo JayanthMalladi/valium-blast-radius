@@ -118,6 +118,34 @@ def _load_validated(maps_dir: str):
     return data["by_class"], set(data["outside"])
 
 
+_TPC_FIXTURES = {"tests/fixtures/optimizer/tpc-h/tpc-h.sql": "tests/test_executor.py::TestExecutor::test_execute_tpch",
+                 "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql": "tests/test_executor.py::TestExecutor::test_execute_tpcds"}
+# TestExecutor tests that read the loaded TPC fixture pairs (the rest of the
+# class reaches the files only through setUpClass loading them).
+_TPC_READERS = {"tests/fixtures/optimizer/tpc-h/tpc-h.sql": ("::TestExecutor::test_optimized_tpch",
+                                                              "::TestExecutor::test_execute_tpch"),
+                "tests/fixtures/optimizer/tpc-ds/tpc-ds.sql": ("::TestExecutor::test_execute_tpcds",)}
+
+
+def _fixture_pairs(text: str):
+    """tests/helpers.py load_sql_fixture_pairs on text: [(meta, sql, expected)]."""
+    lines = "\n".join(line for line in text.splitlines() if line and not line.startswith("--"))
+    statements = lines.split(";")
+    out = []
+    for i in range(0, len(statements), 2):
+        if i + 1 < len(statements):
+            sql = statements[i].strip()
+            meta = {}
+            sql_lines = sql.split("\n")
+            j = 0
+            while sql_lines[j].startswith("#"):
+                key, val = sql_lines[j].split(":", maxsplit=1)
+                meta[key.lstrip("#").strip()] = val.strip()
+                j += 1
+            out.append((meta, "\n".join(sql_lines[j:]), statements[i + 1].strip()))
+    return out
+
+
 def _subprocess_tests(pristine: dict[str, str]) -> set[str]:
     """Node ids of test functions that start another Python process.
 
@@ -420,6 +448,32 @@ class RuleEngine:
                 out |= self._ids([n for n in self.maps.testfile_ids(test_rel) if marker in n])
         return out
 
+    def _fixture_select(self, fp, rel: str) -> set:
+        out = self._fixture_numbers(rel) or self._testfile_numbers("tests/test_optimizer.py")
+        if (rel not in _TPC_FIXTURES or fp.is_new or fp.is_deleted or fp.is_binary
+                or fp.is_renamed or os.environ.get("BR_TPC_FIXTURE", "1") != "1"):
+            return out
+        try:
+            with open(os.path.join(self._pristine_root, rel), encoding="utf-8") as f:
+                pristine = f.read()
+            if not patch_applies(pristine, fp):
+                return out
+            patched = apply_file_patch(pristine, fp)
+            if patched is None:
+                return out
+            before, after = _fixture_pairs(pristine), _fixture_pairs(patched)
+        except Exception:
+            return out
+        # setUpClass still loads the file, so the rest of TestExecutor only
+        # sees it through the pairs the three readers consume.
+        drop = {n for node, n in self.id_by_node.items()
+                if "::TestExecutor::" in node and node.startswith("tests/test_executor.py")
+                and not node.endswith(_TPC_READERS[rel])}
+        # The execute tests consume only (meta, sql) of each pair.
+        if [p[:2] for p in before] == [p[:2] for p in after]:
+            drop.add(self.id_by_node.get(_TPC_FIXTURES[rel]))
+        return out - drop
+
     def _instance_tests(self, qualname: str):
         """Tests that created an instance with qualname in its MRO, or None.
 
@@ -567,7 +621,7 @@ class RuleEngine:
             if rel.endswith(".py"):
                 return self._test_module_numbers(rel)
             if rel.startswith("tests/fixtures/") or rel.endswith((".sql", ".json")):
-                return self._fixture_numbers(rel) or self._testfile_numbers("tests/test_optimizer.py")
+                return self._fixture_select(fp, rel)
             return set()
         if not rel.startswith("sqlglot/") or not rel.endswith(".py"):
             return set()
