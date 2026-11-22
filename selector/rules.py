@@ -115,6 +115,18 @@ def _load_validated(maps_dir: str):
     return data["by_class"], set(data["outside"])
 
 
+def _load_instances(maps_dir: str):
+    # {"by_class": {qualname: [node ids]}, "outside": [qualnames]}: the
+    # sqlglot classes in the MRO of every Dialect/Tokenizer/Parser/Generator
+    # instance each test created (tools/record_validated.py).
+    p = os.path.join(maps_dir, "instance_classes.json")
+    if not os.path.exists(p):
+        return None, set()
+    with open(p, encoding="utf-8") as f:
+        data = json.load(f)
+    return data["by_class"], set(data["outside"])
+
+
 def _lambda_interiors(tree, lines):
     """Interior spans of the lambdas holding every line, or None.
 
@@ -303,7 +315,8 @@ class RuleEngine:
         self._test_importers = _test_importers(pristine_files)
         self._class_setup_paths = _class_setup_paths(pristine_files)
         self._validated, self._validated_outside_tests = _load_validated(maps.dir)
-        self._narrower = Narrower(pristine_files)
+        self._instances, self._instances_outside = _load_instances(maps.dir)
+        self._narrower = Narrower(pristine_files, maps.dir)
 
     # ------------------------------------------------------------------
     def _ids(self, node_ids: list) -> set:
@@ -348,6 +361,17 @@ class RuleEngine:
                 marker = f"::{cls}::"
                 out |= self._ids([n for n in self.maps.testfile_ids(test_rel) if marker in n])
         return out
+
+    def _instance_tests(self, qualname: str):
+        """Tests that created an instance with qualname in its MRO, or None.
+
+        None (no bound) when the map is missing, the class is unknown to it,
+        or an instance of it was also created outside any test.
+        """
+        if not qualname or self._instances is None or qualname in self._instances_outside:
+            return None
+        ids = self._instances.get(qualname)
+        return None if ids is None else self._ids(ids)
 
     def _reader_numbers(self, rel: str) -> set:
         return self._ids(self.maps.reader_ids(rel))
@@ -486,10 +510,12 @@ class RuleEngine:
         if os.environ.get("BR_CONST", "1") == "1":
             narrowed = self._narrower.narrow(rel, pristine, patched)
             if narrowed is not None:
-                _, lines, (test_ids, test_files) = narrowed
+                _, lines, (test_ids, test_files), qualname = narrowed
                 hit = self._ids(sorted(test_ids))
-                for src_rel, ln in lines:
-                    hit |= self._line_numbers(src_rel, ln)
+                made = self._instance_tests(qualname)
+                for src_rel, ln, instance_read in lines:
+                    covered = self._line_numbers(src_rel, ln)
+                    hit |= covered & made if instance_read and made is not None else covered
                 for test_rel in test_files:
                     hit |= self._testfile_numbers(test_rel)
                 return hit | self._reader_numbers(rel) | self._unknown_loader_numbers(rel)

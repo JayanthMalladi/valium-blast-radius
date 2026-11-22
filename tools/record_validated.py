@@ -23,17 +23,25 @@ _child_seen = set()
 _ctx_cache = [None, "<import>"]
 
 
+def _ctx_path():
+    # Kept off the output directory: a bind mount can serve stale mtimes.
+    return os.environ.get("REC_CTX_FILE") or os.path.join(_child_dir, "ctx")
+
+
 def _set(ctx):
     current[0] = ctx
     if _child_dir is not None:
-        with open(os.path.join(_child_dir, "ctx"), "w") as f:
+        tmp = _ctx_path() + ".tmp"
+        with open(tmp, "w") as f:
             f.write(ctx or "<import>")
+        os.replace(tmp, _ctx_path())
 
 
 def _parent_ctx():
-    path = os.path.join(_child_dir, "ctx")
+    path = _ctx_path()
     try:
-        mtime = os.stat(path).st_mtime_ns
+        st = os.stat(path)
+        mtime = (st.st_ino, st.st_mtime_ns)
     except OSError:
         return "<import>"
     if mtime != _ctx_cache[0]:
@@ -52,24 +60,65 @@ def owner(cls):
     return cls.__name__
 
 
+def _note(name):
+    if _child_dir is not None and __name__ != "__main__":
+        key = (_parent_ctx(), name)
+        if key not in _child_seen:
+            _child_seen.add(key)
+            with open(os.path.join(_child_dir, f"{os.getpid()}.jsonl"), "a") as f:
+                f.write(json.dumps(key) + "\n")
+    else:
+        seen.setdefault(current[0] or "<import>", set()).add(name)
+
+
+def _wrap_init(cls):
+    orig = cls.__dict__.get("__init__")
+    if orig is None or getattr(orig, "_recorded", False):
+        return
+
+    def __init__(self, *a, **k):
+        for c in type(self).__mro__:
+            if c.__module__.startswith("sqlglot"):
+                _note("I:" + c.__module__ + "." + c.__qualname__)
+        return orig(self, *a, **k)
+
+    __init__._recorded = True
+    cls.__init__ = __init__
+
+
+def _patch_instances():
+    # Record the classes of every Dialect, Tokenizer, Parser and Generator
+    # instance created ("I:<module>.<qualname>" for each sqlglot class in its
+    # MRO), so a class constant read through self can be bounded by type.
+    import sqlglot.dialects  # noqa: F401  (registers every dialect)
+    from sqlglot.dialects.dialect import Dialect
+    from sqlglot.generator import Generator
+    from sqlglot.parser import Parser
+    from sqlglot.tokens import Tokenizer
+
+    for name in list(getattr(sqlglot.dialects, "__all__", [])):
+        try:
+            getattr(sqlglot.dialects, name)
+        except Exception:
+            pass
+    todo = [Dialect, Generator, Parser, Tokenizer]
+    while todo:
+        cls = todo.pop()
+        _wrap_init(cls)
+        todo.extend(cls.__subclasses__())
+
+
 def _patch():
     from sqlglot.expressions import core
 
     orig = core.Expression.error_messages
 
     def error_messages(self, args=None):
-        name = owner(type(self))
-        if _child_dir is not None and __name__ != "__main__":
-            key = (_parent_ctx(), name)
-            if key not in _child_seen:
-                _child_seen.add(key)
-                with open(os.path.join(_child_dir, f"{os.getpid()}.jsonl"), "a") as f:
-                    f.write(json.dumps(key) + "\n")
-        else:
-            seen.setdefault(current[0] or "<import>", set()).add(name)
+        _note(owner(type(self)))
         return orig(self, args)
 
     core.Expression.error_messages = error_messages
+    _patch_instances()
 
 
 def node_id(test):
@@ -90,6 +139,8 @@ def main():
     for f in os.listdir(_child_dir):
         os.remove(os.path.join(_child_dir, f))
     os.environ["REC_CHILD_DIR"] = _child_dir
+    import tempfile
+    os.environ["REC_CTX_FILE"] = os.path.join(tempfile.mkdtemp(prefix="rec_ctx_"), "ctx")
     os.chdir(root)
     sys.path.insert(0, root)
     os.environ["PYTHONPATH"] = root + os.pathsep + os.environ.get("PYTHONPATH", "")
