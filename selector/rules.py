@@ -73,6 +73,20 @@ def _classify(pristine: str | None, patched: str | None) -> str:
     return "code_change"
 
 
+_GM_NARROW = int(os.environ.get("BR_GM_K", "50"))
+
+
+def _body_only(tree, lines) -> bool:
+    """True when every line lies in a function body, after its header."""
+    if not lines:
+        return False
+    spans = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            spans.append((node.body[0].lineno, node.end_lineno))
+    return all(any(a <= ln <= b for a, b in spans) for ln in lines)
+
+
 def _with_hunks(fp: P.FilePatch, hunks: list) -> P.FilePatch:
     return P.FilePatch(path=fp.path, old_path=fp.old_path, is_new=fp.is_new,
                        is_deleted=fp.is_deleted, is_binary=fp.is_binary,
@@ -413,6 +427,7 @@ class RuleEngine:
         if len(code_hunks) < len(fp.hunks):
             out |= self._reader_numbers(rel)
         changed = changed_pristine_lines(_with_hunks(fp, code_hunks))
+        tree = None
         if self.maps.has_line_coverage:
             try:
                 tree = ast.parse(pristine)
@@ -450,7 +465,16 @@ class RuleEngine:
         if self._canary and len(out) < _THIN_CANARY:
             out |= self._opt_executor_numbers()
 
-        return out | self._unknown_loader_numbers(rel) | self._heap_observer_ids
+        heap = self._heap_observer_ids
+        if (heap and tree and rel != "sqlglot/time.py" and _body_only(tree, changed)
+                and len(out - heap) < _GM_NARROW):
+            # The heap observers measure generator construction, which nearly
+            # every test runs. A function body that fewer than _GM_NARROW tests
+            # execute is not on that path. The labelled function-body edits
+            # that broke the observers ran in 54 (time.format_time, which also
+            # runs while dialects are built) and 1,533 tests.
+            heap = set()
+        return out | self._unknown_loader_numbers(rel) | heap
 
     def _new_source(self, fp: P.FilePatch, rel: str) -> set:
         text = apply_file_patch(None, fp) or ""
