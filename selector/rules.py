@@ -18,6 +18,7 @@ from .maps import Maps
 from .pristine_lines import changed_pristine_lines
 from .statement import statement_ranges
 from .operands import profiled_noop
+from .narrow import Narrower
 
 
 DATA = os.environ.get("BR_DATA", "/data")
@@ -229,6 +230,7 @@ class RuleEngine:
         self._heap_observer_ids = _heap_observers(pristine_files, id_by_node)
         self._test_importers = _test_importers(pristine_files)
         self._class_setup_paths = _class_setup_paths(pristine_files)
+        self._narrower = Narrower(pristine_files)
 
     # ------------------------------------------------------------------
     def _ids(self, node_ids: list) -> set:
@@ -387,6 +389,22 @@ class RuleEngine:
                 and profiled_noop(self.maps.operand_profiles, rel, pristine, patched)):
             return (self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
                     | self._heap_observer_ids)
+
+        # Lambda-body edits, class constants read only in function bodies and
+        # arg_types True/False flips have statically bounded readers
+        # (selector/narrow.py). Isolated single-file commits only.
+        if (getattr(self, "_operand_isolated_file", False)
+                and os.environ.get("BR_NARROW", "1") == "1"):
+            narrowed = self._narrower.narrow(rel, pristine, patched)
+            if narrowed is not None:
+                _, lines, test_files = narrowed
+                out = set()
+                for src_rel, ln in lines:
+                    out |= self._line_numbers(src_rel, ln)
+                for test_rel in test_files:
+                    out |= self._testfile_numbers(test_rel)
+                return (out | self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
+                        | self._heap_observer_ids)
 
         # CODE_CHANGE. Hunks that are comment/docstring-only on their own
         # (applying just that hunk leaves the AST unchanged) contribute no
