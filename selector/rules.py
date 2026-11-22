@@ -109,7 +109,7 @@ def _heap_observers(pristine: dict[str, str], id_by_node: dict[str, int]) -> set
             elif isinstance(node, ast.ImportFrom) and node.module == "tracemalloc":
                 functions.update(a.asname or a.name for a in node.names if a.name in probes)
 
-        def visit(node, names):
+        def visit(node, names, modules=modules, functions=functions, rel=rel):
             if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
                 names = [*names, node.name]
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
