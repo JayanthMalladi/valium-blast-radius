@@ -453,16 +453,8 @@ class RuleEngine:
         if (rel not in _TPC_FIXTURES or fp.is_new or fp.is_deleted or fp.is_binary
                 or fp.is_renamed or os.environ.get("BR_TPC_FIXTURE", "1") != "1"):
             return out
-        try:
-            with open(os.path.join(self._pristine_root, rel), encoding="utf-8") as f:
-                pristine = f.read()
-            if not patch_applies(pristine, fp):
-                return out
-            patched = apply_file_patch(pristine, fp)
-            if patched is None:
-                return out
-            before, after = _fixture_pairs(pristine), _fixture_pairs(patched)
-        except Exception:
+        same = self._tpc_pairs_same(fp, rel)
+        if same is None:
             return out
         # setUpClass still loads the file, so the rest of TestExecutor only
         # sees it through the pairs the three readers consume.
@@ -470,9 +462,28 @@ class RuleEngine:
                 if "::TestExecutor::" in node and node.startswith("tests/test_executor.py")
                 and not node.endswith(_TPC_READERS[rel])}
         # The execute tests consume only (meta, sql) of each pair.
-        if [p[:2] for p in before] == [p[:2] for p in after]:
+        if same:
             drop.add(self.id_by_node.get(_TPC_FIXTURES[rel]))
         return out - drop
+
+    def _tpc_pairs_same(self, fp, rel: str):
+        """Whether a TPC fixture edit leaves every (meta, sql) pair unchanged;
+        None when the patched file cannot be loaded the way the tests load it."""
+        if (rel not in _TPC_FIXTURES or fp.is_new or fp.is_deleted or fp.is_binary
+                or fp.is_renamed):
+            return None
+        try:
+            with open(os.path.join(self._pristine_root, rel), encoding="utf-8") as f:
+                pristine = f.read()
+            if not patch_applies(pristine, fp):
+                return None
+            patched = apply_file_patch(pristine, fp)
+            if patched is None:
+                return None
+            before, after = _fixture_pairs(pristine), _fixture_pairs(patched)
+        except Exception:
+            return None
+        return [p[:2] for p in before] == [p[:2] for p in after]
 
     def _instance_tests(self, qualname: str):
         """Tests that created an instance with qualname in its MRO, or None.
@@ -516,6 +527,19 @@ class RuleEngine:
         patched: dict = {}
         for fp in files:
             rel = fp.path
+            if (rel.startswith("tests/fixtures/") and os.environ.get("BR_TPC_FIXTURE", "1") == "1"
+                    and not fp.is_renamed and not fp.is_deleted and not fp.is_new):
+                # The probe reads the pristine fixtures: allowed only when the
+                # test's own inputs there are unchanged (other fixture files
+                # are never read by it).
+                if rel in _TPC_FIXTURES:
+                    if self._tpc_pairs_same(fp, rel):
+                        continue
+                    return False
+                if not rel.startswith(("tests/fixtures/optimizer/tpc-h/",
+                                       "tests/fixtures/optimizer/tpc-ds/")):
+                    continue
+                return False
             if (fp.is_new or fp.is_deleted or fp.is_binary or fp.is_renamed
                     or not rel.startswith("sqlglot/") or not rel.endswith(".py")
                     or rel.startswith(_TPCDS_RUNTIME)):
@@ -531,6 +555,8 @@ class RuleEngine:
                 if tree is None or not _body_only(tree, changed_pristine_lines(fp)):
                     return False
             patched[rel] = text
+        if not patched:
+            return True
         import shutil
         import subprocess
         import tempfile
