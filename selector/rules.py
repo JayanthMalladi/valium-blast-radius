@@ -510,11 +510,59 @@ class RuleEngine:
         sel: set = set()
         for fp in files:
             sel |= self._file(fp)
+        mx = self.id_by_node.get(_MAX_NODES_TEST)
+        if (mx in sel and os.environ.get("BR_MAXNODES_PROBE", "1") == "1"
+                and self._maxnodes_ok(files)):
+            sel.discard(mx)
         tpcds = self.id_by_node.get(_TPCDS_TEST)
         if (tpcds in sel and os.environ.get("BR_TPCDS_PROBE", "1") == "1"
                 and self._tpcds_unchanged(files)):
             sel.discard(tpcds)
         return sel
+
+    def _maxnodes_ok(self, files: list) -> bool:
+        """A scaled replica of test_max_nodes passes on the patched tree
+        (selector/maxnodes_probe.py); any doubt or failure keeps the test."""
+        if self._tpcds_spent > _TPCDS_BUDGET:
+            return False
+        patched: dict = {}
+        for fp in files:
+            rel = fp.path
+            if (fp.is_new or fp.is_deleted or fp.is_binary or fp.is_renamed
+                    or not rel.startswith("sqlglot/") or not rel.endswith(".py")):
+                return False
+            pristine = self.pristine.get(rel)
+            if not pristine or not patch_applies(pristine, fp):
+                return False
+            text = apply_file_patch(pristine, fp)
+            if text is None or _safe_parse(text) is None:
+                return False
+            patched[rel] = text
+        import shutil
+        import subprocess
+        import tempfile
+        import time
+        work = tempfile.mkdtemp(prefix="maxn_")
+        start = time.monotonic()
+        try:
+            shutil.copytree(os.path.join(self._pristine_root, "sqlglot"),
+                            os.path.join(work, "sqlglot"),
+                            ignore=shutil.ignore_patterns("__pycache__"))
+            for rel, text in patched.items():
+                with open(os.path.join(work, rel), "w", encoding="utf-8") as f:
+                    f.write(text)
+            here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            env = dict(os.environ, PYTHONPATH=work + os.pathsep + here,
+                       PYTHONDONTWRITEBYTECODE="1")
+            r = subprocess.run([sys.executable, "-m", "selector.maxnodes_probe"],
+                               cwd=work, env=env, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=60)
+            return r.returncode == 0
+        except Exception:
+            return False
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+            self._tpcds_spent += time.monotonic() - start
 
     def _tpcds_unchanged(self, files: list) -> bool:
         """The staged TPC-DS digest of the patched tree equals the pristine one.
