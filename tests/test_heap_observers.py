@@ -110,3 +110,27 @@ def test_lambda_interior_edit_drops_heap_observer(tmp_path):
     # The lambda's first line also holds the dict key, which runs at import.
     header = source.replace("'a': lambda", "'b': lambda")
     assert _covered_engine(tmp_path, "sqlglot/dialects/dialect.py", source, header, [1, 2, 3, 4, 5]) == {0, 1}
+
+
+def test_lambda_interior_uses_only_lambda_line_coverage(tmp_path):
+    import json
+    rel = "sqlglot/parsers/demo.py"
+    source = "F = {\n    'a': lambda args: max(\n        args,\n    ),\n}\n"
+    patched = source.replace("        args,", "        args[1:],")
+    ids = ["tests/test_x.py::test_x", "tests/test_y.py::test_y"]
+    (tmp_path / "id_order.json").write_text(json.dumps(ids))
+    # test_y imported the module (every line of the statement); test_x called the lambda.
+    cov = {"1": "2", "2": "3", "3": "1", "4": "2", "5": "2"}
+    (tmp_path / "line_coverage.json").write_text(json.dumps({rel: cov}))
+    maps = Maps(str(tmp_path))
+    maps.load()
+    engine = RuleEngine(maps, {i: n for n, i in enumerate(ids)}, {rel: source})
+    diff = "".join(difflib.unified_diff(source.splitlines(True), patched.splitlines(True),
+                                        fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+    assert engine.select_for_files(parse_patch(f"diff --git a/{rel} b/{rel}\n" + diff)) == {0}
+    # An immediately called lambda runs at import: the statement rule stays.
+    called = source.replace("lambda args: max(\n        args,\n    ),", "(lambda args: max(\n        args,\n    ))(1),")
+    engine = RuleEngine(maps, {i: n for n, i in enumerate(ids)}, {rel: called})
+    diff = "".join(difflib.unified_diff(called.splitlines(True), called.replace("        args,", "        args[1:],").splitlines(True),
+                                        fromfile=f"a/{rel}", tofile=f"b/{rel}"))
+    assert engine.select_for_files(parse_patch(f"diff --git a/{rel} b/{rel}\n" + diff)) == {0, 1}

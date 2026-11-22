@@ -77,6 +77,12 @@ def _classify(pristine: str | None, patched: str | None) -> str:
 _GM_NARROW = int(os.environ.get("BR_GM_K", "50"))
 
 
+def _called_lambdas(tree) -> set:
+    """ids of lambdas called where they are defined, e.g. (lambda: x)()."""
+    return {id(n.func) for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Lambda)}
+
+
 def _body_only(tree, lines) -> bool:
     """True when every line lies in code that runs only when called.
 
@@ -87,12 +93,42 @@ def _body_only(tree, lines) -> bool:
     if not lines:
         return False
     spans = []
+    called = _called_lambdas(tree)
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
             spans.append((node.body[0].lineno, node.end_lineno))
-        elif isinstance(node, ast.Lambda) and not node.args.defaults and not node.args.kw_defaults:
+        elif (isinstance(node, ast.Lambda) and not node.args.defaults
+              and not node.args.kw_defaults and id(node) not in called):
             spans.append((node.lineno + 1, node.end_lineno - 1))
     return all(any(a <= ln <= b for a, b in spans) for ln in lines)
+
+
+def _lambda_interiors(tree, lines):
+    """Interior spans of the lambdas holding every line, or None.
+
+    None unless each line is strictly inside a default-free lambda that is not
+    itself inside a function (function bodies keep the statement rule).
+    """
+    if not lines:
+        return None
+    funcs, lams = [], []
+    called = _called_lambdas(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs.append((node.lineno, node.end_lineno))
+        elif (isinstance(node, ast.Lambda) and not node.args.defaults
+              and not node.args.kw_defaults and id(node) not in called):
+            if node.end_lineno - node.lineno >= 2:
+                lams.append((node.lineno + 1, node.end_lineno - 1))
+    spans = set()
+    for ln in lines:
+        if any(a <= ln <= b for a, b in funcs):
+            return None
+        inner = [s for s in lams if s[0] <= ln <= s[1]]
+        if not inner:
+            return None
+        spans.add(min(inner, key=lambda s: s[1] - s[0]))
+    return sorted(spans)
 
 
 def _with_hunks(fp: P.FilePatch, hunks: list) -> P.FilePatch:
@@ -465,7 +501,15 @@ class RuleEngine:
                 tree = ast.parse(pristine)
             except Exception:
                 tree = None
-            if tree:
+            lam = _lambda_interiors(tree, changed) if tree else None
+            if lam is not None:
+                # Lines inside a lambda in a table run only when it is called;
+                # the enclosing class-body statement ran at import, for
+                # whichever test imported the module first.
+                for a, b in lam:
+                    for ln in range(a, b + 1):
+                        out |= self._line_numbers(rel, ln)
+            elif tree:
                 for a, b in statement_ranges(tree, changed):
                     for ln in range(a, b + 1):
                         for num in self._line_numbers(rel, ln):
