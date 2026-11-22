@@ -30,7 +30,12 @@ def pack(tests: list[int], durations_ms: dict[int, int]) -> list[list[int]]:
         return _pack_exact(tests, durations_ms)
     loads = [durations_ms.get(t, 0) for t in tests]
     best: tuple[int, list[list[int]]] | None = None
+    total = sum(loads)
+    longest = max(loads)
     for k in range(1, min(8, len(tests)) + 1):
+        # No assignment can beat either the longest test or the average load.
+        if best is not None and max(longest, (total + k - 1) // k) + 2000 * k >= best[0]:
+            continue
         workers, load = _lpt(loads, tests, k)
         _improve(workers, load, durations_ms, k)
         makespan = max(load) + 2000 * k
@@ -53,11 +58,13 @@ def _pack_exact(tests: list[int], durations_ms: dict[int, int]) -> list[list[int
 
     def rec(i: int, used: int) -> None:
         nonlocal best_cost, best_assign
+        cost = max(loads[:used]) + 2000 * used
+        # Durations and the worker count can only increase below this node.
+        if cost >= best_cost:
+            return
         if i == n:
-            cost = max(loads[:used]) + 2000 * used
-            if cost < best_cost:
-                best_cost = cost
-                best_assign = assign[:]
+            best_cost = cost
+            best_assign = assign[:]
             return
         for a in range(used):
             assign[i] = a
@@ -98,6 +105,12 @@ def _improve(workers: list[list[int]], load: list[int],
     for _ in range(_MAX_SWEEPS):
         cur = max(load)
         busiest = max(range(k), key=lambda j: load[j])
+        # Moving or swapping cannot lower two equal maximum loads at once.
+        if load.count(cur) > 1:
+            return
+        other_max = [max((load[x] for x in range(k) if x != busiest and x != j),
+                         default=0) for j in range(k)]
+        busiest_load = load[busiest]
 
         best_newmax = cur
         best_move: tuple[int, int] | None = None        # (i in busiest, target j)
@@ -108,7 +121,7 @@ def _improve(workers: list[list[int]], load: list[int],
             for j in range(k):
                 if j == busiest:
                     continue
-                nm = _newmax(load, busiest, j, -d, d)
+                nm = max(busiest_load - d, load[j] + d, other_max[j])
                 if nm < best_newmax:
                     best_newmax, best_move, best_swap = nm, (i, j), None
         for i, t in enumerate(workers[busiest]):
@@ -120,7 +133,8 @@ def _improve(workers: list[list[int]], load: list[int],
                     d2 = durations.get(t2, 0)
                     if d2 >= d1:
                         continue
-                    nm = _newmax(load, busiest, j, d2 - d1, d1 - d2)
+                    delta = d1 - d2
+                    nm = max(busiest_load - delta, load[j] + delta, other_max[j])
                     if nm < best_newmax:
                         best_newmax, best_move, best_swap = nm, None, (i, j, jj)
 
@@ -141,13 +155,3 @@ def _improve(workers: list[list[int]], load: list[int],
             load[j] += durations.get(t1, 0) - durations.get(t2, 0)
         else:
             return
-
-
-def _newmax(load: list[int], a: int, b: int, delta_a: int, delta_b: int) -> int:
-    """Makespan after adding delta_a to load[a] and delta_b to load[b]."""
-    m = 0
-    for x in range(len(load)):
-        v = load[x] + (delta_a if x == a else delta_b if x == b else 0)
-        if v > m:
-            m = v
-    return m
