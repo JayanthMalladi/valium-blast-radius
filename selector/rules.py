@@ -18,6 +18,7 @@ from .maps import Maps
 from .pristine_lines import changed_pristine_lines
 from .statement import statement_ranges
 from .operands import profiled_noop
+from .argflip import affected_owners, flipped_class
 from .narrow import Narrower
 
 
@@ -101,6 +102,17 @@ def _body_only(tree, lines) -> bool:
               and not node.args.kw_defaults and id(node) not in called):
             spans.append((node.lineno + 1, node.end_lineno - 1))
     return all(any(a <= ln <= b for a, b in spans) for ln in lines)
+
+
+def _load_validated(maps_dir: str):
+    # {"by_class": {owner: [node ids]}, "outside": [owners validated outside
+    # any test: at import, in lazily built module state, or in teardown]}.
+    p = os.path.join(maps_dir, "validated_classes.json")
+    if not os.path.exists(p):
+        return None, set()
+    with open(p, encoding="utf-8") as f:
+        data = json.load(f)
+    return data["by_class"], set(data["outside"])
 
 
 def _lambda_interiors(tree, lines):
@@ -290,6 +302,7 @@ class RuleEngine:
         self._heap_observer_ids = _heap_observers(pristine_files, id_by_node)
         self._test_importers = _test_importers(pristine_files)
         self._class_setup_paths = _class_setup_paths(pristine_files)
+        self._validated, self._validated_outside_tests = _load_validated(maps.dir)
         self._narrower = Narrower(pristine_files)
 
     # ------------------------------------------------------------------
@@ -452,6 +465,19 @@ class RuleEngine:
         # Patched text that is not valid Python breaks the import chain.
         if _safe_parse(patched) is None:
             return self._full_suite_numbers()
+
+        # An edit that only flips True/False values in one arg_types dict
+        # reaches tests only through required-argument validation
+        # (selector/argflip.py). Classes also validated outside any test, at
+        # import or in lazily built module state, keep the ordinary rule.
+        if self._validated is not None and os.environ.get("BR_ARGFLIP", "1") == "1":
+            name = flipped_class(pristine, patched)
+            owners = affected_owners(self.pristine, name) if name else None
+            if owners and not owners & self._validated_outside_tests:
+                hit: set = set()
+                for owner in owners:
+                    hit |= self._ids(self._validated.get(owner, []))
+                return hit | self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
 
         # A class-level literal constant read only inside function bodies
         # (no import-time or class-construction reads, no names built in
