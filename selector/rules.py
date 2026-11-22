@@ -641,6 +641,17 @@ class RuleEngine:
                     hit |= self._testfile_numbers(test_rel)
                 return hit | self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
 
+        # Risky: a literal class constant of one dialect's own class reaches
+        # only tests that instantiated a class with it in the MRO.
+        if os.environ.get("BR_RISKY", "1") == "1":
+            dc = self._narrower.dialect_constant(rel, pristine, patched)
+            made = self._instance_tests(dc[0]) if dc else None
+            if made is not None:
+                hit = made | self._ids(sorted(self._narrower._test_mentions(dc[1])[0]))
+                for test_rel in self._narrower._test_mentions(dc[1])[1]:
+                    hit |= self._testfile_numbers(test_rel)
+                return hit | self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
+
         # All operand pairs observed in the complete pristine suite must have
         # agreed under identity/equality, with comparison methods established
         # as safe at profile time. Unknown, custom-rich-comparison and partial

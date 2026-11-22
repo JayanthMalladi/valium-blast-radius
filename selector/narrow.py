@@ -280,6 +280,51 @@ class Narrower:
                 return res
         return None
 
+    def dialect_constant(self, rel: str, pristine: str, patched: str):
+        """(qualname, name) for one literal class-level constant edit inside a
+        single dialect's own module, or None.
+
+        Risky rule (BR_RISKY): a dialect-specific class is reached only through
+        instances whose MRO holds it, including the state its metaclass derives
+        at import. Bails when another module names the constant through a
+        class chain (copied into another dialect's tables).
+        """
+        if not rel.startswith(("sqlglot/dialects/", "sqlglot/parsers/", "sqlglot/generators/")):
+            return None
+        if rel.rsplit("/", 1)[-1] in ("__init__.py", "dialect.py", "base.py", "python.py"):
+            return None
+        try:
+            ta, tb = ast.parse(pristine), ast.parse(patched)
+        except SyntaxError:
+            return None
+        diffs: list = []
+        _diff(ta, tb, diffs)
+        if not diffs:
+            return None
+        pa, pb = _parents(ta), _parents(tb)
+        target = None
+        for a, b in diffs:
+            ha, hb = self._class_assign(a, pa), self._class_assign(b, pb)
+            if ha is None or hb is None:
+                return None
+            if target is not None and ha[0] is not target[0]:
+                return None
+            target, other = ha, hb
+        assign, owner = target
+        name = assign.targets[0].id
+        if (name == "arg_types" or other[0].targets[0].id != name
+                or not _literal(assign.value) or not _literal(other[0].value)):
+            return None
+        qual = self._qualname(rel, owner, pa)
+        if not qual:
+            return None
+        outer = qual[len(rel[:-3].replace("/", ".")) + 1:].split(".")[0]
+        chain = re.compile(r"\b" + re.escape(outer) + r"(\.\w+)*\." + re.escape(name) + r"\b")
+        for r, text in self.sources.items():
+            if r.startswith("sqlglot/") and chain.search(text):
+                return None
+        return qual, name
+
     def _class_assign(self, node, parents):
         """The class-level single-target Assign whose value contains node."""
         for anc in _ancestors(node, parents):
