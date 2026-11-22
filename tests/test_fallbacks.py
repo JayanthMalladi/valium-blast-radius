@@ -135,6 +135,52 @@ def test_comment_only_uses_readers_not_full_suite(tmp_path):
     assert sel == {3}                   # source reader only
 
 
+def test_comment_only_uses_statement_coverage_and_readers(tmp_path):
+    source = "def helper():\n    value = 1\n    return value\n"
+    patch = f"""diff --git a/{REL} b/{REL}
+--- a/{REL}
++++ b/{REL}
+@@ -2,2 +2,3 @@
+     value = 1
++# a comment
+     return value
+"""
+    coverage = {REL: {"2": "1", "3": "2"}}
+    engine = _engine(tmp_path, coverage, {REL: source})
+    sel = engine.select_for_files(P.parse_patch(patch))
+    assert sel == {1, 2, 3}  # both adjacent statements plus the source reader
+
+
+def test_normal_one_line_function_edit_is_unchanged(tmp_path):
+    source = "def helper():\n    value = 1\n    return value\n"
+    patch = f"""diff --git a/{REL} b/{REL}
+--- a/{REL}
++++ b/{REL}
+@@ -3,1 +3,1 @@
+-    return value
++    return value + 1
+"""
+    coverage = {REL: {"2": "1", "3": "2"}}
+    engine = _engine(tmp_path, coverage, {REL: source})
+    sel = engine.select_for_files(P.parse_patch(patch))
+    assert sel == {2}
+
+
+def test_added_coding_cookie_selects_full_suite(tmp_path):
+    source = "#!/usr/bin/env python\nvalue = 1\n"
+    patch = f"""diff --git a/{REL} b/{REL}
+--- a/{REL}
++++ b/{REL}
+@@ -1,2 +1,3 @@
+ #!/usr/bin/env python
++# -*- coding: ascii -*-
+ value = 1
+"""
+    coverage = {REL: {"1": "1", "2": "2"}}
+    engine = _engine(tmp_path, coverage, {REL: source})
+    assert engine.select_for_files(P.parse_patch(patch)) == _full(engine)
+
+
 def test_non_py_outside_tests_and_sqlglot_selects_nothing(tmp_path):
     patch = """diff --git a/docs/notes.md b/docs/notes.md
 --- a/docs/notes.md

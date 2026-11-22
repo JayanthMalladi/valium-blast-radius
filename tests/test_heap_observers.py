@@ -39,8 +39,8 @@ def test_semantic_change_keeps_heap_observer_without_line_coverage(tmp_path):
         return engine.select_for_files(parse_patch(f"diff --git a/{rel} b/{rel}\n" + diff))
 
     assert select(source.replace("return 1", "return 2")) == {77}
-    # Textual edits cannot change the allocation behavior of executed code.
-    assert select(source.replace("return 1", "return 1  # explanation")) == set()
+    # Textual edits now follow the code-edit path, including heap observers.
+    assert select(source.replace("return 1", "return 1  # explanation")) == {77}
 
 
 def test_snapshot_observer_and_uncollected_helper():

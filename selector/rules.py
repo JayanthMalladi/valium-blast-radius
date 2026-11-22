@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 
 from . import patch as P
 from .hunkapply import apply_file_patch, patch_applies
@@ -24,6 +25,7 @@ RUN_NAME = os.environ.get("BR_DEBUG_RUN", "debug")
 _THIN_CANARY = 50   # fire canary when code-change selection is below this
 _SHARED_TEST_FILES = {"tests/__init__.py", "tests/helpers.py"}
 _BUILD_FILES = {"pyproject.toml", "setup.py", "setup.cfg", "pytest.ini", "tox.ini", "conftest.py"}
+_CODING_COOKIE = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*[-\w.]+")
 
 
 def _write_reasons(path: str, entries: list[dict]) -> None:
@@ -73,6 +75,14 @@ def _with_hunks(fp: P.FilePatch, hunks: list) -> P.FilePatch:
     return P.FilePatch(path=fp.path, old_path=fp.old_path, is_new=fp.is_new,
                        is_deleted=fp.is_deleted, is_binary=fp.is_binary,
                        is_renamed=fp.is_renamed, hunks=list(hunks))
+
+
+def _coding_cookie_changed(pristine: str, patched: str) -> bool:
+    def cookies(source: str) -> list[str]:
+        return [line for line in source.splitlines()[:2] if _CODING_COOKIE.match(line)]
+
+    new_cookies = cookies(patched)
+    return bool(new_cookies) and new_cookies != cookies(pristine)
 
 
 def _hunk_is_comment_only(pristine: str, fp: P.FilePatch, hunk) -> bool:
@@ -264,13 +274,16 @@ class RuleEngine:
         if patched is None:
             return self._full_suite_numbers()
 
+        try:
+            compile(patched, rel, "exec")
+        except (SyntaxError, ValueError):
+            return self._full_suite_numbers()
+        if _coding_cookie_changed(pristine, patched):
+            return self._full_suite_numbers()
+
         cat = _classify(pristine, patched)
         if cat == "import_break":
             return self._full_suite_numbers()
-        if cat == "comment_only":
-            # Source readers and tests with unknown coverage retain their
-            # existing signal for textual edits.
-            return self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
 
         # A patch whose hunks do not match the pristine file cannot be applied
         # to the pinned source, so its effect cannot be bounded.
@@ -280,14 +293,13 @@ class RuleEngine:
         if _safe_parse(patched) is None:
             return self._full_suite_numbers()
 
-        # CODE_CHANGE. Hunks that are comment/docstring-only on their own
-        # (applying just that hunk leaves the AST unchanged) contribute no
-        # changed statement; they only reach the source readers.
-        code_hunks = [h for h in fp.hunks if not _hunk_is_comment_only(pristine, fp, h)]
-        out: set = set()
-        if len(code_hunks) < len(fp.hunks):
-            out |= self._reader_numbers(rel)
-        changed = changed_pristine_lines(_with_hunks(fp, code_hunks))
+        # Textual hunks need the same statement coverage as code. Comments and
+        # docstrings can still affect source readers apart from their AST.
+        has_textual_hunks = cat == "comment_only" or any(
+            _hunk_is_comment_only(pristine, fp, h) for h in fp.hunks
+        )
+        out: set = self._reader_numbers(rel) if has_textual_hunks else set()
+        changed = changed_pristine_lines(fp)
         if self.maps.has_line_coverage:
             try:
                 tree = ast.parse(pristine)
