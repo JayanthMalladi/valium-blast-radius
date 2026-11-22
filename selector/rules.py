@@ -133,14 +133,17 @@ def _subprocess_tests(pristine: dict[str, str]) -> set[str]:
         tree = _safe_parse(src)
         if tree is None:
             continue
+        lines = src.splitlines()
         for node in tree.body:
             funcs = [(None, node)] if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else []
             if isinstance(node, ast.ClassDef):
                 funcs += [(node.name, f) for f in node.body
                           if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))]
             for cname, f in funcs:
-                body = ast.get_source_segment(src, f) or ""
-                if f.name.startswith("test") and any(
+                if not f.name.startswith("test"):
+                    continue
+                body = "\n".join(lines[f.lineno - 1:f.end_lineno])
+                if any(
                         k in body for k in ("subprocess", "os.system", "Popen", "os.exec")):
                     out.add(rel + "::" + (cname + "::" if cname else "") + f.name)
     return out
