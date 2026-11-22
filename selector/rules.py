@@ -132,6 +132,48 @@ def _heap_observers(pristine: dict[str, str], id_by_node: dict[str, int]) -> set
     return observers
 
 
+def _test_importers(pristine: dict[str, str]) -> dict[str, set[str]]:
+    """Test files that import each test module, transitively (e.g. every
+    dialect test imports Validator from tests/dialects/test_dialect.py)."""
+    files = {rel: src for rel, src in pristine.items()
+             if rel.startswith("tests/") and rel.endswith(".py")}
+    by_module = {rel[:-3].replace("/", "."): rel for rel in files}
+    for rel in list(files):
+        if rel.endswith("/__init__.py"):
+            by_module[rel[:-12].replace("/", ".")] = rel
+    direct: dict[str, set[str]] = {}
+    for rel, src in files.items():
+        tree = _safe_parse(src)
+        if tree is None:
+            continue
+        pkg = rel.rsplit("/", 1)[0].replace("/", ".")
+        for node in ast.walk(tree):
+            mods = []
+            if isinstance(node, ast.Import):
+                mods = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                if node.level:
+                    parts = pkg.split(".")
+                    parts = parts[:len(parts) - node.level + 1]
+                    base = ".".join(parts + ([base] if base else []))
+                mods = [base] + [f"{base}.{a.name}" for a in node.names]
+            for mod in mods:
+                target = by_module.get(mod)
+                if target and target != rel:
+                    direct.setdefault(target, set()).add(rel)
+    out: dict[str, set[str]] = {}
+    for target in direct:
+        seen, todo = set(), list(direct[target])
+        while todo:
+            f = todo.pop()
+            if f not in seen:
+                seen.add(f)
+                todo.extend(direct.get(f, ()))
+        out[target] = seen
+    return out
+
+
 class RuleEngine:
     def __init__(self, maps: Maps, id_by_node: dict[str, int],
                  pristine_files: dict[str, str]) -> None:
@@ -148,6 +190,7 @@ class RuleEngine:
         self._reasons: list[dict] = []
         self._opt_exec_ids: set[int] | None = None
         self._heap_observer_ids = _heap_observers(pristine_files, id_by_node)
+        self._test_importers = _test_importers(pristine_files)
 
     # ------------------------------------------------------------------
     def _ids(self, node_ids: list) -> set:
@@ -177,6 +220,13 @@ class RuleEngine:
 
     def _testfile_numbers(self, rel: str) -> set:
         return self._ids(self.maps.testfile_ids(rel))
+
+    def _test_module_numbers(self, rel: str) -> set:
+        # A test module's own tests plus the tests of every module importing it.
+        out = self._testfile_numbers(rel)
+        for importer in self._test_importers.get(rel, ()):
+            out |= self._testfile_numbers(importer)
+        return out
 
     def _fixture_numbers(self, rel: str) -> set:
         return self._ids(self.maps.fixture_ids(rel))
@@ -232,7 +282,7 @@ class RuleEngine:
             if rel.endswith(".py") and rel.startswith("sqlglot/"):
                 return self._full_suite_numbers()
             if rel.startswith("tests/") and rel.endswith(".py"):
-                return self._testfile_numbers(rel)
+                return self._test_module_numbers(rel)
             if rel.startswith("tests/fixtures/"):
                 return self._fixture_numbers(rel) or self._testfile_numbers("tests/test_optimizer.py")
             return set()
@@ -240,13 +290,13 @@ class RuleEngine:
             if rel.startswith("sqlglot/") and rel.endswith(".py"):
                 return self._full_suite_numbers()
             if rel.startswith("tests/") and rel.endswith(".py"):
-                return self._testfile_numbers(rel)
+                return self._test_module_numbers(rel)
             if rel.startswith("tests/fixtures/") or rel.endswith((".sql", ".json")):
                 return self._fixture_numbers(rel) or self._testfile_numbers("tests/test_optimizer.py")
             return set()
         if rel.startswith("tests/"):
             if rel.endswith(".py"):
-                return self._testfile_numbers(rel)
+                return self._test_module_numbers(rel)
             if rel.startswith("tests/fixtures/") or rel.endswith((".sql", ".json")):
                 return self._fixture_numbers(rel) or self._testfile_numbers("tests/test_optimizer.py")
             return set()

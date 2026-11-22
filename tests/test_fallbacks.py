@@ -179,3 +179,42 @@ rename from docs/old.md
 rename to docs/new.md
 """
     assert engine.select_for_files(P.parse_patch(patch)) == set()
+
+
+def _importer_engine(tmp_path: Path) -> RuleEngine:
+    base = "tests/dialects/test_dialect.py"
+    pristine = {
+        REL: PRISTINE,
+        base: "import unittest\nclass Validator(unittest.TestCase):\n    pass\n",
+        "tests/dialects/test_duckdb.py": "from tests.dialects.test_dialect import Validator\n",
+        "tests/dialects/test_mysql.py": "from .test_dialect import Validator\n",
+        "tests/test_parser.py": "import unittest\n",
+    }
+    engine = _engine(tmp_path, pristine=pristine)
+    engine.maps.test_files.update({
+        base: ["a"], "tests/dialects/test_duckdb.py": ["b"],
+        "tests/dialects/test_mysql.py": ["f"], "tests/test_parser.py": ["g"],
+    })
+    return engine
+
+
+def _edit(path: str) -> list:
+    return P.parse_patch(f"""diff --git a/{path} b/{path}
+--- a/{path}
++++ b/{path}
+@@ -1 +1 @@
+-old
++new
+""")
+
+
+def test_edit_to_imported_test_module_selects_its_importers(tmp_path):
+    engine = _importer_engine(tmp_path)
+    ids = engine.id_by_node
+    got = engine.select_for_files(_edit("tests/dialects/test_dialect.py"))
+    assert got == {ids["a"], ids["b"], ids["f"]}
+
+
+def test_edit_to_unimported_test_module_selects_only_itself(tmp_path):
+    engine = _importer_engine(tmp_path)
+    assert engine.select_for_files(_edit("tests/test_parser.py")) == {engine.id_by_node["g"]}
