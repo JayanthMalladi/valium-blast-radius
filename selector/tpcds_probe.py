@@ -36,7 +36,11 @@ def _queries(root: str):
     return ns["TPCDS_SCHEMA"], list(ns["load_sql_fixture_pairs"]("optimizer/tpc-ds/tpc-ds.sql"))
 
 
-def digest(root: str) -> dict:
+class Differs(Exception):
+    """Raised when a staged entry differs from the expected digest."""
+
+
+def digest(root: str, expected: dict | None = None) -> dict:
     import unittest  # noqa: F401  (sqlglot checks for it at import, as the tests do)
 
     from sqlglot import parse_one, transpile
@@ -49,6 +53,8 @@ def digest(root: str) -> dict:
     schema_dict, pairs = _queries(root)
     schema = ensure_schema(schema_dict)
     out: dict = {"schema": _sha(repr(schema.mapping))}
+    if expected is not None and expected.get("schema") != out["schema"]:
+        raise Differs("schema")
     tables = {name: Table(columns=list(cols)) for name, cols in schema_dict.items()}
 
     sources: list = []
@@ -101,6 +107,8 @@ def digest(root: str) -> dict:
             except Exception as exc:
                 parts.append("error:" + type(exc).__name__ + ":" + str(exc)[:200])
             out[str(i)] = _sha("\n\x00".join(parts))
+            if expected is not None and expected.get(str(i)) != out[str(i)]:
+                raise Differs(str(i))
     finally:
         py.PythonExecutor.generate = orig_generate
     return out
@@ -108,7 +116,15 @@ def digest(root: str) -> dict:
 
 def main() -> None:
     root, out = sys.argv[1], sys.argv[2]
-    d = digest(root)
+    expected = None
+    if len(sys.argv) > 3:
+        # Stop at the first entry that differs from this digest (exit 3).
+        with open(sys.argv[3], encoding="utf-8") as f:
+            expected = json.load(f)
+    try:
+        d = digest(root, expected)
+    except Differs:
+        sys.exit(3)
     with open(out, "w", encoding="utf-8") as f:
         json.dump(d, f, sort_keys=True)
 

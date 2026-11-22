@@ -495,7 +495,10 @@ class RuleEngine:
             here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             env = dict(os.environ, PYTHONPATH=work + os.pathsep + here,
                        PYTHONDONTWRITEBYTECODE="1")
-            r = subprocess.run([sys.executable, "-m", "selector.tpcds_probe", work, out],
+            expected = os.path.join(work, "expected.json")
+            with open(expected, "w", encoding="utf-8") as f:
+                json.dump(self._tpcds_digest, f)
+            r = subprocess.run([sys.executable, "-m", "selector.tpcds_probe", work, out, expected],
                                cwd=work, env=env, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL, timeout=90)
             if r.returncode != 0:
