@@ -18,6 +18,7 @@ from .maps import Maps
 from .pristine_lines import changed_pristine_lines
 from .statement import statement_ranges
 from .operands import profiled_noop
+from .narrow import Narrower
 
 
 DATA = os.environ.get("BR_DATA", "/data")
@@ -253,6 +254,7 @@ class RuleEngine:
         self._heap_observer_ids = _heap_observers(pristine_files, id_by_node)
         self._test_importers = _test_importers(pristine_files)
         self._class_setup_paths = _class_setup_paths(pristine_files)
+        self._narrower = Narrower(pristine_files)
 
     # ------------------------------------------------------------------
     def _ids(self, node_ids: list) -> set:
@@ -414,6 +416,21 @@ class RuleEngine:
         # Patched text that is not valid Python breaks the import chain.
         if _safe_parse(patched) is None:
             return self._full_suite_numbers()
+
+        # A class-level literal constant read only inside function bodies
+        # (no import-time or class-construction reads, no names built in
+        # f-strings) reaches only tests that executed a read, or whose test
+        # method names it. Heap observers count only when they executed a read.
+        if os.environ.get("BR_CONST", "1") == "1":
+            narrowed = self._narrower.narrow(rel, pristine, patched)
+            if narrowed is not None:
+                _, lines, (test_ids, test_files) = narrowed
+                hit = self._ids(sorted(test_ids))
+                for src_rel, ln in lines:
+                    hit |= self._line_numbers(src_rel, ln)
+                for test_rel in test_files:
+                    hit |= self._testfile_numbers(test_rel)
+                return hit | self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
 
         # All operand pairs observed in the complete pristine suite must have
         # agreed under identity/equality, with comparison methods established
