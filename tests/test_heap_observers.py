@@ -101,3 +101,12 @@ def test_class_level_edit_and_time_module_keep_heap_observer(tmp_path):
                            source.replace("X = 1", "X = 2"), [1, 2, 3]) == {0, 1}
     assert _covered_engine(tmp_path, "sqlglot/time.py", source,
                            source.replace("return 1", "return 2"), [1, 2, 3]) == {0, 1}
+
+
+def test_lambda_interior_edit_drops_heap_observer(tmp_path):
+    source = "F = {\n    'a': lambda args: max(\n        args,\n    ),\n}\n"
+    patched = source.replace("        args,", "        args[1:],")
+    assert _covered_engine(tmp_path, "sqlglot/dialects/dialect.py", source, patched, [1, 2, 3, 4, 5]) == {0}
+    # The lambda's first line also holds the dict key, which runs at import.
+    header = source.replace("'a': lambda", "'b': lambda")
+    assert _covered_engine(tmp_path, "sqlglot/dialects/dialect.py", source, header, [1, 2, 3, 4, 5]) == {0, 1}

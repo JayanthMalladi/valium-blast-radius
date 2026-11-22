@@ -77,13 +77,20 @@ _GM_NARROW = int(os.environ.get("BR_GM_K", "50"))
 
 
 def _body_only(tree, lines) -> bool:
-    """True when every line lies in a function body, after its header."""
+    """True when every line lies in code that runs only when called.
+
+    That is a function body after its header, or a lambda's lines strictly
+    between its first and last line (those two can hold dict keys, defaults
+    or other code that runs where the lambda is defined).
+    """
     if not lines:
         return False
     spans = []
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
             spans.append((node.body[0].lineno, node.end_lineno))
+        elif isinstance(node, ast.Lambda) and not node.args.defaults and not node.args.kw_defaults:
+            spans.append((node.lineno + 1, node.end_lineno - 1))
     return all(any(a <= ln <= b for a, b in spans) for ln in lines)
 
 
@@ -416,8 +423,16 @@ class RuleEngine:
         if (getattr(self, "_operand_isolated_file", False)
                 and os.environ.get("BR_OPERANDS", "1") == "1"
                 and profiled_noop(self.maps.operand_profiles, rel, pristine, patched)):
-            return (self._reader_numbers(rel) | self._unknown_loader_numbers(rel)
-                    | self._heap_observer_ids)
+            # Every observed evaluation agreed, so the executed code and its
+            # allocations are unchanged; a body-only edit cannot reach the
+            # heap observers either.
+            heap = self._heap_observer_ids
+            try:
+                if _body_only(ast.parse(pristine), changed_pristine_lines(fp)):
+                    heap = set()
+            except SyntaxError:
+                pass
+            return self._reader_numbers(rel) | self._unknown_loader_numbers(rel) | heap
 
         # CODE_CHANGE. Hunks that are comment/docstring-only on their own
         # (applying just that hunk leaves the AST unchanged) contribute no
